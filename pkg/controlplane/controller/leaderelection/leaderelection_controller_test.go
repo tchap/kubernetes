@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,10 +29,13 @@ import (
 	v1alpha2 "k8s.io/api/coordination/v1alpha2"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	fakecoordinationv1alpha2 "k8s.io/client-go/kubernetes/typed/coordination/v1alpha2/fake"
+	clienttesting "k8s.io/client-go/testing"
 	testingclock "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 )
@@ -40,17 +44,19 @@ func TestReconcileElectionStep(t *testing.T) {
 	fakeClock := testingclock.NewFakeClock(time.Now())
 
 	tests := []struct {
-		name                    string
-		leaseNN                 types.NamespacedName
-		candidates              []*v1alpha2.LeaseCandidate
-		existingLease           *v1.Lease
-		expectLease             bool
-		expectedHolderIdentity  *string
-		expectedPreferredHolder *string
-		expectedRequeue         bool
-		expectedError           bool
-		expectedStrategy        *v1.CoordinatedLeaseStrategy
-		candidatesPinged        bool
+		name                                       string
+		leaseNN                                    types.NamespacedName
+		candidates                                 []*v1alpha2.LeaseCandidate
+		existingLease                              *v1.Lease
+		leaseCandidatesUpdateError                 error
+		expectLease                                bool
+		expectedHolderIdentity                     *string
+		expectedPreferredHolder                    *string
+		expectedRequeue                            bool
+		expectedError                              bool
+		expectedStrategy                           *v1.CoordinatedLeaseStrategy
+		expectedLeaseCandidatesUpdateNumberOfCalls int32
+		candidatesPinged                           bool
 	}{
 		{
 			name:                   "no candidates, no lease, noop",
@@ -272,7 +278,49 @@ func TestReconcileElectionStep(t *testing.T) {
 			expectedStrategy:       nil,
 			expectedRequeue:        true,
 			expectedError:          false,
-			candidatesPinged:       true,
+			expectedLeaseCandidatesUpdateNumberOfCalls: 1,
+			candidatesPinged: true,
+		},
+		{
+			name:    "candidates exist, update lease candidates error",
+			leaseNN: types.NamespacedName{Namespace: "default", Name: "component-A"},
+			candidates: []*v1alpha2.LeaseCandidate{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "component-identity-1",
+					},
+					Spec: v1alpha2.LeaseCandidateSpec{
+						LeaseName:        "component-A",
+						EmulationVersion: "1.19.0",
+						BinaryVersion:    "1.19.0",
+						RenewTime:        ptr.To(metav1.NewMicroTime(fakeClock.Now().Add(-2 * electionDuration))),
+						Strategy:         v1.OldestEmulationVersion,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "component-identity-2",
+					},
+					Spec: v1alpha2.LeaseCandidateSpec{
+						LeaseName:        "component-A",
+						EmulationVersion: "1.20.0",
+						BinaryVersion:    "1.20.0",
+						RenewTime:        ptr.To(metav1.NewMicroTime(fakeClock.Now().Add(-1 * electionDuration))),
+						Strategy:         v1.OldestEmulationVersion,
+					},
+				},
+			},
+			existingLease:              nil,
+			leaseCandidatesUpdateError: context.DeadlineExceeded,
+			expectLease:                false,
+			expectedHolderIdentity:     nil,
+			expectedStrategy:           nil,
+			expectedRequeue:            true,
+			expectedError:              true,
+			expectedLeaseCandidatesUpdateNumberOfCalls: 2,
+			candidatesPinged: false,
 		},
 		{
 			name:    "candidate exist, pinged candidate should have until electionDuration until election decision is made",
@@ -340,6 +388,19 @@ func TestReconcileElectionStep(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			client := fake.NewSimpleClientset()
+
+			var leaseCandidatesUpdateNumberOfCalls atomic.Int32
+			client.CoordinationV1alpha2().(*fakecoordinationv1alpha2.FakeCoordinationV1alpha2).PrependReactor(
+				"update", "leasecandidates",
+				func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+					leaseCandidatesUpdateNumberOfCalls.Add(1)
+					if err := tc.leaseCandidatesUpdateError; err != nil {
+						return true, nil, err
+					}
+					return false, nil, nil
+				},
+			)
+
 			informerFactory := informers.NewSharedInformerFactory(client, 0)
 
 			controller, err := NewController(
@@ -411,6 +472,11 @@ func TestReconcileElectionStep(t *testing.T) {
 				t.Errorf("reconcileElectionStep() expected no lease to be created")
 			}
 
+			// Verify the number of times LeaseCandidates.Update was called.
+			if got := leaseCandidatesUpdateNumberOfCalls.Load(); tc.expectedLeaseCandidatesUpdateNumberOfCalls != got {
+				t.Errorf("LeaseCandidates.Update number of calls = %d, want = %d", got, tc.expectedLeaseCandidatesUpdateNumberOfCalls)
+			}
+
 			// Verify that ping to candidate was issued
 			if tc.candidatesPinged {
 				pinged := false
@@ -434,7 +500,6 @@ func TestReconcileElectionStep(t *testing.T) {
 					t.Errorf("reconcileElectionStep() expected candidates to be pinged")
 				}
 			}
-
 		})
 	}
 }
