@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/blang/semver/v4"
@@ -38,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/mux"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -135,6 +137,9 @@ controller, and serviceaccounts controller.`,
 			}
 			cliflag.PrintFlags(cmd.Flags())
 
+			// We use context.Background() here still because using server.SetupSignalContext() would cause
+			// components like the event broadcaster to terminate on signal immediately, which is not what we want.
+			// Termination for that case is being handled explicitly in Run() later on.
 			ctx := context.Background()
 			c, err := s.Config(ctx, KnownControllers(), ControllersDisabledByDefault(), ControllerAliases())
 			if err != nil {
@@ -146,7 +151,7 @@ controller, and serviceaccounts controller.`,
 			fg.(featuregate.MutableFeatureGate).AddMetrics()
 			// add component version metrics
 			s.ComponentGlobalsRegistry.AddMetrics()
-			return Run(ctx, c.Complete())
+			return Run(server.SetupSignalContext(), c.Complete())
 		},
 		Args: func(cmd *cobra.Command, args []string) error {
 			for _, arg := range args {
@@ -187,6 +192,10 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	logger := klog.FromContext(ctx)
 	stopCh := ctx.Done()
 
+	// We need to handle calls to be deferred manually since we can either return or exit in OnStoppedLeading.
+	var shutdownHooks hookList
+	defer shutdownHooks.Execute()
+
 	// To help debugging, immediately log version
 	logger.Info("Starting", "version", utilversion.Get())
 
@@ -195,7 +204,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	// Start events processing pipeline.
 	c.EventBroadcaster.StartStructuredLogging(0)
 	c.EventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: c.Client.CoreV1().Events("")})
-	defer c.EventBroadcaster.Shutdown()
+	shutdownHooks.Register(c.EventBroadcaster.Shutdown)
 
 	if cfgz, err := configz.New(ConfigzName); err == nil {
 		cfgz.Set(c.ComponentConfig)
@@ -239,16 +248,21 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 
 	saTokenControllerDescriptor := newServiceAccountTokenControllerDescriptor(rootClientBuilder)
 
+	// We must store the exit code from run() for later and not exit in that function,
+	// because that would cause leader election lease not to be released.
+	var exitCode atomic.Int32
 	run := func(ctx context.Context, controllerDescriptors map[string]*ControllerDescriptor) {
 		controllerContext, err := CreateControllerContext(ctx, c, rootClientBuilder, clientBuilder)
 		if err != nil {
 			logger.Error(err, "Error building controller context")
-			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+			exitCode.Store(1)
+			return
 		}
 
 		if err := StartControllers(ctx, controllerContext, controllerDescriptors, unsecuredMux, healthzHandler); err != nil {
 			logger.Error(err, "Error starting controllers")
-			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+			exitCode.Store(1)
+			return
 		}
 
 		controllerContext.InformerFactory.Start(stopCh)
@@ -340,7 +354,12 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 				run(ctx, controllerDescriptors)
 			},
 			OnStoppedLeading: func() {
-				logger.Error(nil, "leaderelection lost")
+				shutdownHooks.Execute()
+				if ctx.Err() != nil {
+					logger.Info("leader election: leading stopped")
+					klog.FlushAndExit(klog.ExitFlushTimeout, int(exitCode.Load()))
+				}
+				logger.Error(nil, "leader election: leading lost")
 				klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 			},
 		})
@@ -367,14 +386,19 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 					run(ctx, controllerDescriptors)
 				},
 				OnStoppedLeading: func() {
-					logger.Error(nil, "migration leaderelection lost")
+					shutdownHooks.Execute()
+					if ctx.Err() != nil {
+						logger.Info("leader migration: leading stopped")
+						klog.FlushAndExit(klog.ExitFlushTimeout, int(exitCode.Load()))
+					}
+					logger.Error(nil, "leader migration: leading lost")
 					klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 				},
 			})
 	}
 
-	<-stopCh
-	return nil
+	// Exit is handled by OnStoppedLeading callback.
+	select {}
 }
 
 // ControllerContext defines the context object for controller
@@ -889,14 +913,15 @@ func leaderElectAndRun(ctx context.Context, c *config.CompletedConfig, lockIdent
 	}
 
 	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:          rl,
-		LeaseDuration: c.ComponentConfig.Generic.LeaderElection.LeaseDuration.Duration,
-		RenewDeadline: c.ComponentConfig.Generic.LeaderElection.RenewDeadline.Duration,
-		RetryPeriod:   c.ComponentConfig.Generic.LeaderElection.RetryPeriod.Duration,
-		Callbacks:     callbacks,
-		WatchDog:      electionChecker,
-		Name:          leaseName,
-		Coordinated:   utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CoordinatedLeaderElection),
+		Lock:            rl,
+		LeaseDuration:   c.ComponentConfig.Generic.LeaderElection.LeaseDuration.Duration,
+		RenewDeadline:   c.ComponentConfig.Generic.LeaderElection.RenewDeadline.Duration,
+		RetryPeriod:     c.ComponentConfig.Generic.LeaderElection.RetryPeriod.Duration,
+		Callbacks:       callbacks,
+		WatchDog:        electionChecker,
+		ReleaseOnCancel: true,
+		Name:            leaseName,
+		Coordinated:     utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CoordinatedLeaderElection),
 	})
 
 	panic("unreachable")
