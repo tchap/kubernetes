@@ -21,6 +21,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -192,10 +193,6 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	logger := klog.FromContext(ctx)
 	stopCh := ctx.Done()
 
-	// We need to handle calls to be deferred manually since we can either return or exit in OnStoppedLeading.
-	var shutdownHooks hookList
-	defer shutdownHooks.Execute()
-
 	// To help debugging, immediately log version
 	logger.Info("Starting", "version", utilversion.Get())
 
@@ -204,7 +201,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	// Start events processing pipeline.
 	c.EventBroadcaster.StartStructuredLogging(0)
 	c.EventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: c.Client.CoreV1().Events("")})
-	shutdownHooks.Register(c.EventBroadcaster.Shutdown)
+	defer c.EventBroadcaster.Shutdown()
 
 	if cfgz, err := configz.New(ConfigzName); err == nil {
 		cfgz.Set(c.ComponentConfig)
@@ -338,11 +335,30 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	}
 
 	// Start the main lock
-	go leaderElectAndRun(ctx, c, id, electionChecker,
+	type LeaderElectionEvent struct {
+		ID      string
+		Leading bool
+	}
+	leCh := make(chan LeaderElectionEvent, 2)
+	emitLeaderElectionEvent := func(ctx context.Context, id string, leading bool) bool {
+		select {
+		case leCh <- LeaderElectionEvent{ID: id, Leading: leading}:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	leCtx, cancel := context.WithCancel(ctx)
+	go leaderElectAndRun(leCtx, c, id, electionChecker,
 		c.ComponentConfig.Generic.LeaderElection.ResourceLock,
 		c.ComponentConfig.Generic.LeaderElection.ResourceName,
 		leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
+				if !emitLeaderElectionEvent(ctx, "leader election", true) {
+					return
+				}
+
 				controllerDescriptors := NewControllerDescriptors()
 				if leaderMigrator != nil {
 					// If leader migration is enabled, we should start only non-migrated controllers
@@ -354,13 +370,13 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 				run(ctx, controllerDescriptors)
 			},
 			OnStoppedLeading: func() {
-				shutdownHooks.Execute()
 				if ctx.Err() != nil {
 					logger.Info("leader election: leading stopped")
-					klog.FlushAndExit(klog.ExitFlushTimeout, int(exitCode.Load()))
+				} else {
+					logger.Error(nil, "leader election: leading lost")
 				}
-				logger.Error(nil, "leader election: leading lost")
-				klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+
+				emitLeaderElectionEvent(context.Background(), "leader election", false)
 			},
 		})
 
@@ -373,11 +389,15 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 		<-leaderMigrator.MigrationReady
 
 		// Start the migration lock.
-		go leaderElectAndRun(ctx, c, id, electionChecker,
+		go leaderElectAndRun(leCtx, c, id, electionChecker,
 			c.ComponentConfig.Generic.LeaderMigration.ResourceLock,
 			c.ComponentConfig.Generic.LeaderMigration.LeaderName,
 			leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(ctx context.Context) {
+					if !emitLeaderElectionEvent(ctx, "leader migration", true) {
+						return
+					}
+
 					logger.Info("leader migration: starting migrated controllers.")
 					controllerDescriptors := NewControllerDescriptors()
 					controllerDescriptors = filteredControllerDescriptors(controllerDescriptors, leaderMigrator.FilterFunc, leadermigration.ControllerMigrated)
@@ -386,19 +406,50 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 					run(ctx, controllerDescriptors)
 				},
 				OnStoppedLeading: func() {
-					shutdownHooks.Execute()
 					if ctx.Err() != nil {
 						logger.Info("leader migration: leading stopped")
-						klog.FlushAndExit(klog.ExitFlushTimeout, int(exitCode.Load()))
+					} else {
+						logger.Error(nil, "leader migration: leading lost")
 					}
-					logger.Error(nil, "leader migration: leading lost")
-					klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+
+					emitLeaderElectionEvent(context.Background(), "leader migration", false)
 				},
 			})
 	}
 
-	// Exit is handled by OnStoppedLeading callback.
-	select {}
+	doneCh := ctx.Done()
+	active := sets.New[string]()
+EventLoop:
+	for {
+		select {
+		case e := <-leCh:
+			logger.Info("Leader election event received", "event", e)
+			if e.Leading {
+				active.Insert(e.ID)
+			} else {
+				active.Delete(e.ID)
+				cancel()
+			}
+
+			if active.Len() == 0 {
+				break EventLoop
+			}
+
+		case <-doneCh:
+			if active.Len() == 0 {
+				break EventLoop
+			}
+
+			cancel()
+			doneCh = nil
+		}
+	}
+
+	if exitCode.Load() == 0 {
+		return nil
+	} else {
+		return errors.New("failed")
+	}
 }
 
 // ControllerContext defines the context object for controller
@@ -923,8 +974,6 @@ func leaderElectAndRun(ctx context.Context, c *config.CompletedConfig, lockIdent
 		Name:            leaseName,
 		Coordinated:     utilfeature.DefaultFeatureGate.Enabled(kubefeatures.CoordinatedLeaderElection),
 	})
-
-	panic("unreachable")
 }
 
 // filteredControllerDescriptors returns all controllerDescriptors after filtering through filterFunc.
