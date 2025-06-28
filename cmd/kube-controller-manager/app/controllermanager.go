@@ -21,13 +21,11 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"os"
 	"sort"
-	"sync/atomic"
 	"time"
 
 	"github.com/blang/semver/v4"
@@ -245,21 +243,16 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 
 	saTokenControllerDescriptor := newServiceAccountTokenControllerDescriptor(rootClientBuilder)
 
-	// We must store the exit code from run() for later and not exit in that function,
-	// because that would cause leader election lease not to be released.
-	var exitCode atomic.Int32
-	run := func(ctx context.Context, controllerDescriptors map[string]*ControllerDescriptor) {
+	run := func(ctx context.Context, controllerDescriptors map[string]*ControllerDescriptor) error {
 		controllerContext, err := CreateControllerContext(ctx, c, rootClientBuilder, clientBuilder)
 		if err != nil {
 			logger.Error(err, "Error building controller context")
-			exitCode.Store(1)
-			return
+			return err
 		}
 
 		if err := StartControllers(ctx, controllerContext, controllerDescriptors, unsecuredMux, healthzHandler); err != nil {
 			logger.Error(err, "Error starting controllers")
-			exitCode.Store(1)
-			return
+			return err
 		}
 
 		controllerContext.InformerFactory.Start(stopCh)
@@ -267,14 +260,14 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 		close(controllerContext.InformersStarted)
 
 		<-ctx.Done()
+		return nil
 	}
 
 	// No leader election, run directly
 	if !c.ComponentConfig.Generic.LeaderElection.LeaderElect {
 		controllerDescriptors := NewControllerDescriptors()
 		controllerDescriptors[names.ServiceAccountTokenController] = saTokenControllerDescriptor
-		run(ctx, controllerDescriptors)
-		return nil
+		return run(ctx, controllerDescriptors)
 	}
 
 	id, err := os.Hostname()
@@ -335,27 +328,13 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 	}
 
 	// Start the main lock
-	type LeaderElectionEvent struct {
-		ID      string
-		Leading bool
-	}
-	leCh := make(chan LeaderElectionEvent, 2)
-	emitLeaderElectionEvent := func(ctx context.Context, id string, leading bool) bool {
-		select {
-		case leCh <- LeaderElectionEvent{ID: id, Leading: leading}:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
-
-	leCtx, cancel := context.WithCancel(ctx)
-	go leaderElectAndRun(leCtx, c, id, electionChecker,
+	mgr := newLeaderElectionManager()
+	go leaderElectAndRun(mgr.Context(), c, id, electionChecker,
 		c.ComponentConfig.Generic.LeaderElection.ResourceLock,
 		c.ComponentConfig.Generic.LeaderElection.ResourceName,
 		leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				if !emitLeaderElectionEvent(ctx, "leader election", true) {
+				if !mgr.StartedLeading(ctx, "main") {
 					return
 				}
 
@@ -367,16 +346,10 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 					logger.Info("leader migration: starting main controllers.")
 				}
 				controllerDescriptors[names.ServiceAccountTokenController] = saTokenControllerDescriptor
-				run(ctx, controllerDescriptors)
+				mgr.Error(run(ctx, controllerDescriptors))
 			},
 			OnStoppedLeading: func() {
-				if ctx.Err() != nil {
-					logger.Info("leader election: leading stopped")
-				} else {
-					logger.Error(nil, "leader election: leading lost")
-				}
-
-				emitLeaderElectionEvent(context.Background(), "leader election", false)
+				mgr.StoppedLeading("main")
 			},
 		})
 
@@ -389,12 +362,12 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 		<-leaderMigrator.MigrationReady
 
 		// Start the migration lock.
-		go leaderElectAndRun(leCtx, c, id, electionChecker,
+		go leaderElectAndRun(mgr.Context(), c, id, electionChecker,
 			c.ComponentConfig.Generic.LeaderMigration.ResourceLock,
 			c.ComponentConfig.Generic.LeaderMigration.LeaderName,
 			leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(ctx context.Context) {
-					if !emitLeaderElectionEvent(ctx, "leader migration", true) {
+					if !mgr.StartedLeading(ctx, "migration") {
 						return
 					}
 
@@ -403,53 +376,16 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 					controllerDescriptors = filteredControllerDescriptors(controllerDescriptors, leaderMigrator.FilterFunc, leadermigration.ControllerMigrated)
 					// DO NOT start saTokenController under migration lock
 					delete(controllerDescriptors, names.ServiceAccountTokenController)
-					run(ctx, controllerDescriptors)
+					mgr.Error(run(ctx, controllerDescriptors))
 				},
 				OnStoppedLeading: func() {
-					if ctx.Err() != nil {
-						logger.Info("leader migration: leading stopped")
-					} else {
-						logger.Error(nil, "leader migration: leading lost")
-					}
-
-					emitLeaderElectionEvent(context.Background(), "leader migration", false)
+					mgr.StoppedLeading("migration")
 				},
 			})
 	}
 
-	doneCh := ctx.Done()
-	active := sets.New[string]()
-EventLoop:
-	for {
-		select {
-		case e := <-leCh:
-			logger.Info("Leader election event received", "event", e)
-			if e.Leading {
-				active.Insert(e.ID)
-			} else {
-				active.Delete(e.ID)
-				cancel()
-			}
-
-			if active.Len() == 0 {
-				break EventLoop
-			}
-
-		case <-doneCh:
-			if active.Len() == 0 {
-				break EventLoop
-			}
-
-			cancel()
-			doneCh = nil
-		}
-	}
-
-	if exitCode.Load() == 0 {
-		return nil
-	} else {
-		return errors.New("failed")
-	}
+	// Block until interrupted and all leader elections are stopped.
+	return mgr.Wait(ctx)
 }
 
 // ControllerContext defines the context object for controller
