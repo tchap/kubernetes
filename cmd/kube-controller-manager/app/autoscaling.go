@@ -92,15 +92,15 @@ func newHorizontalPodAutoscalerController(ctx context.Context, controllerContext
 		controllerContext.ComponentConfig.HPAController.HorizontalPodAutoscalerCPUInitializationPeriod.Duration,
 		controllerContext.ComponentConfig.HPAController.HorizontalPodAutoscalerInitialReadinessDelay.Duration,
 	)
-	return newNamedRunnable(runnables{
-		runnableFunc(func(ctx context.Context) {
+	return newControllerLoop(concurrentRun(
+		func(ctx context.Context) {
 			custom_metrics.PeriodicallyInvalidate(
 				apiVersionsGetter,
 				controllerContext.ComponentConfig.HPAController.HorizontalPodAutoscalerSyncPeriod.Duration,
 				ctx.Done())
-		}),
-		runnableFunc(func(ctx context.Context) {
+		},
+		func(ctx context.Context) {
 			pas.Run(ctx, int(controllerContext.ComponentConfig.HPAController.ConcurrentHorizontalPodAutoscalerSyncs))
-		}),
-	}, controllerName), nil
+		},
+	), controllerName), nil
 }

@@ -78,8 +78,8 @@ func newSVMController(ctx context.Context, controllerContext ControllerContext, 
 		return nil, fmt.Errorf("failed to create metadata client for %s: %w", controllerName, err)
 	}
 
-	return newNamedRunnable(runnables{
-		runnableFunc(svm.NewSVMController(
+	return newControllerLoop(concurrentRun(
+		svm.NewSVMController(
 			ctx,
 			client,
 			dynamicClient,
@@ -87,14 +87,14 @@ func newSVMController(ctx context.Context, controllerContext ControllerContext, 
 			controllerName,
 			controllerContext.RESTMapper,
 			controllerContext.GraphBuilder,
-		).Run),
-		runnableFunc(svm.NewResourceVersionController(
+		).Run,
+		svm.NewResourceVersionController(
 			ctx,
 			client,
 			discoveryClient,
 			metaClient,
 			informer,
 			controllerContext.RESTMapper,
-		).Run),
-	}, controllerName), nil
+		).Run,
+	), controllerName), nil
 }

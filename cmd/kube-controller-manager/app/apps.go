@@ -59,7 +59,7 @@ func newDaemonSetController(ctx context.Context, controllerContext ControllerCon
 		return nil, fmt.Errorf("error creating DaemonSets controller: %w", err)
 	}
 
-	return newNamedRunnableFunc(func(ctx context.Context) {
+	return newControllerLoop(func(ctx context.Context) {
 		dsc.Run(ctx, int(controllerContext.ComponentConfig.DaemonSetController.ConcurrentDaemonSetSyncs))
 	}, controllerName), nil
 }
@@ -86,7 +86,7 @@ func newStatefulSetController(ctx context.Context, controllerContext ControllerC
 		controllerContext.InformerFactory.Apps().V1().ControllerRevisions(),
 		client,
 	)
-	return newNamedRunnableFunc(func(ctx context.Context) {
+	return newControllerLoop(func(ctx context.Context) {
 		ssc.Run(ctx, int(controllerContext.ComponentConfig.StatefulSetController.ConcurrentStatefulSetSyncs))
 	}, controllerName), nil
 }
@@ -112,7 +112,7 @@ func newReplicaSetController(ctx context.Context, controllerContext ControllerCo
 		client,
 		replicaset.BurstReplicas,
 	)
-	return newNamedRunnableFunc(func(ctx context.Context) {
+	return newControllerLoop(func(ctx context.Context) {
 		rsc.Run(ctx, int(controllerContext.ComponentConfig.ReplicaSetController.ConcurrentRSSyncs))
 	}, controllerName), nil
 }
@@ -142,7 +142,7 @@ func newDeploymentController(ctx context.Context, controllerContext ControllerCo
 		return nil, fmt.Errorf("error creating Deployment controller: %w", err)
 	}
 
-	return newNamedRunnableFunc(func(ctx context.Context) {
+	return newControllerLoop(func(ctx context.Context) {
 		dc.Run(ctx, int(controllerContext.ComponentConfig.DeploymentController.ConcurrentDeploymentSyncs))
 	}, controllerName), nil
 }

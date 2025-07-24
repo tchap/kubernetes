@@ -25,7 +25,6 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"sort"
 	"sync"
 	"time"
 
@@ -53,7 +52,6 @@ import (
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	certutil "k8s.io/client-go/util/cert"
-	"k8s.io/client-go/util/keyutil"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/cli/globalflag"
 	basecompatibility "k8s.io/component-base/compatibility"
@@ -82,9 +80,7 @@ import (
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 	kubectrlmgrconfig "k8s.io/kubernetes/pkg/controller/apis/config"
 	garbagecollector "k8s.io/kubernetes/pkg/controller/garbagecollector"
-	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
 	kubefeatures "k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/pkg/serviceaccount"
 )
 
 func init() {
@@ -310,10 +306,10 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 			// This wrapping is not exactly flawless as RunControllers uses type casting,
 			// which is now not possible for the wrapped controller.
 			// This fortunately doesn't matter for this particular controller.
-			return newNamedRunnable(runnableFunc(func(ctx context.Context) {
+			return newControllerLoop(func(ctx context.Context) {
 				close(leaderMigrator.MigrationReady)
 				ctrl.Run(ctx)
-			}), controllerName), nil
+			}, controllerName), nil
 		}
 	}
 
@@ -462,279 +458,6 @@ func (c ControllerContext) NewClient(name string) (kubernetes.Interface, error) 
 		return nil, fmt.Errorf("failed to create Kubernetes client for %q: %w", name, err)
 	}
 	return client, nil
-}
-
-// Runnable represents a loop implementing any piece of logic really.
-type Runnable interface {
-	// Run implements any kind of processing loop.
-	// When there is anything to be done, it blocks until the context is cancelled.
-	// Run must ensure all goroutines are terminated before returning.
-	Run(context.Context)
-}
-
-// Controller defines the base interface that all controller wrappers must implement.
-type Controller interface {
-	// Name returns the controller's canonical name.
-	Name() string
-
-	// Runnable is the main controller loop.
-	Runnable
-}
-
-// runnableFunc makes it possible to turn a function into a Runnable quickly.
-type runnableFunc func(context.Context)
-
-func (run runnableFunc) Run(ctx context.Context) {
-	run(ctx)
-}
-
-// runnables is a slice of Runnable objects that are to be run concurrently.
-type runnables []Runnable
-
-func (rx runnables) Run(ctx context.Context) {
-	var wg sync.WaitGroup
-	wg.Add(len(rx))
-	for _, r := range rx {
-		go func() {
-			defer wg.Done()
-			r.Run(ctx)
-		}()
-	}
-	wg.Wait()
-}
-
-func runAll(ctx context.Context, rx ...Runnable) {
-	runnables(rx).Run(ctx)
-}
-
-// namedRunnable implements the Controller interface.
-type namedRunnable struct {
-	Runnable
-	name string
-}
-
-func newNamedRunnable(runnable Runnable, name string) *namedRunnable {
-	return &namedRunnable{
-		Runnable: runnable,
-		name:     name,
-	}
-}
-
-func (r *namedRunnable) Name() string {
-	return r.name
-}
-
-// newNamedRunnableFunc makes it easy to turn a single function into a Controller.
-func newNamedRunnableFunc(fnc func(context.Context), name string) *namedRunnable {
-	return newNamedRunnable(runnableFunc(fnc), name)
-}
-
-// ControllerContructor is a constructor for a controller.
-// A nil Controller returned means that the associated controller is disabled.
-type ControllerContructor func(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error)
-
-type ControllerDescriptor struct {
-	name                      string
-	constructor               ControllerContructor
-	requiredFeatureGates      []featuregate.Feature
-	aliases                   []string
-	isDisabledByDefault       bool
-	isCloudProviderController bool
-	requiresSpecialHandling   bool
-}
-
-func (r *ControllerDescriptor) Name() string {
-	return r.name
-}
-
-func (r *ControllerDescriptor) GetControllerConstructor() ControllerContructor {
-	return r.constructor
-}
-
-func (r *ControllerDescriptor) GetRequiredFeatureGates() []featuregate.Feature {
-	return append([]featuregate.Feature(nil), r.requiredFeatureGates...)
-}
-
-// GetAliases returns aliases to ensure backwards compatibility and should never be removed!
-// Only addition of new aliases is allowed, and only when a canonical name is changed (please see CHANGE POLICY of controller names)
-func (r *ControllerDescriptor) GetAliases() []string {
-	return append([]string(nil), r.aliases...)
-}
-
-func (r *ControllerDescriptor) IsDisabledByDefault() bool {
-	return r.isDisabledByDefault
-}
-
-func (r *ControllerDescriptor) IsCloudProviderController() bool {
-	return r.isCloudProviderController
-}
-
-// RequiresSpecialHandling should return true only in a special non-generic controllers like ServiceAccountTokenController
-func (r *ControllerDescriptor) RequiresSpecialHandling() bool {
-	return r.requiresSpecialHandling
-}
-
-// BuildController creates a controller based on the given descriptor.
-// The associated controller's constructor is called at the end, so the same contract applies for the return values here.
-func (r *ControllerDescriptor) BuildController(ctx context.Context, controllerCtx ControllerContext) (Controller, error) {
-	logger := klog.FromContext(ctx)
-	controllerName := r.Name()
-
-	for _, featureGate := range r.GetRequiredFeatureGates() {
-		if !utilfeature.DefaultFeatureGate.Enabled(featureGate) {
-			logger.Info("Controller is disabled by a feature gate",
-				"controller", controllerName,
-				"requiredFeatureGates", r.GetRequiredFeatureGates())
-			return nil, nil
-		}
-	}
-
-	if r.IsCloudProviderController() {
-		logger.Info("Skipping a cloud provider controller", "controller", controllerName)
-		return nil, nil
-	}
-
-	if !controllerCtx.IsControllerEnabled(r) {
-		logger.Info("Warning: controller is disabled", "controller", controllerName)
-		return nil, nil
-	}
-
-	ctx = klog.NewContext(ctx, klog.LoggerWithName(logger, controllerName))
-	return r.GetControllerConstructor()(ctx, controllerCtx, controllerName)
-}
-
-// KnownControllers returns all known controllers' name
-func KnownControllers() []string {
-	return sets.StringKeySet(NewControllerDescriptors()).List()
-}
-
-// ControllerAliases returns a mapping of aliases to canonical controller names
-func ControllerAliases() map[string]string {
-	aliases := map[string]string{}
-	for name, c := range NewControllerDescriptors() {
-		for _, alias := range c.GetAliases() {
-			aliases[alias] = name
-		}
-	}
-	return aliases
-}
-
-func ControllersDisabledByDefault() []string {
-	var controllersDisabledByDefault []string
-
-	for name, c := range NewControllerDescriptors() {
-		if c.IsDisabledByDefault() {
-			controllersDisabledByDefault = append(controllersDisabledByDefault, name)
-		}
-	}
-
-	sort.Strings(controllersDisabledByDefault)
-
-	return controllersDisabledByDefault
-}
-
-// NewControllerDescriptors is a public map of named controller groups (you can start more than one in an init func)
-// paired to their ControllerDescriptor wrapper object that includes the associated controller constructor.
-// This allows for structured downstream composition and subdivision.
-func NewControllerDescriptors() map[string]*ControllerDescriptor {
-	controllers := map[string]*ControllerDescriptor{}
-	aliases := sets.NewString()
-
-	// All the controllers must fulfil common constraints, or else we will explode.
-	register := func(controllerDesc *ControllerDescriptor) {
-		if controllerDesc == nil {
-			panic("received nil controller for a registration")
-		}
-		name := controllerDesc.Name()
-		if len(name) == 0 {
-			panic("received controller without a name for a registration")
-		}
-		if _, found := controllers[name]; found {
-			panic(fmt.Sprintf("controller name %q was registered twice", name))
-		}
-		if controllerDesc.GetControllerConstructor() == nil {
-			panic(fmt.Sprintf("controller %q does not have a constructor specified", name))
-		}
-
-		for _, alias := range controllerDesc.GetAliases() {
-			if aliases.Has(alias) {
-				panic(fmt.Sprintf("controller %q has a duplicate alias %q", name, alias))
-			}
-			aliases.Insert(alias)
-		}
-
-		controllers[name] = controllerDesc
-	}
-
-	// First add "special" controllers that aren't initialized normally. These controllers cannot be initialized
-	// in the main controller loop initialization, so we add them here only for the metadata and duplication detection.
-	// app.ControllerDescriptor#RequiresSpecialHandling should return true for such controllers
-	// The only known special case is the ServiceAccountTokenController which *must* be started
-	// first to ensure that the SA tokens for future controllers will exist. Think very carefully before adding new
-	// special controllers.
-	register(newServiceAccountTokenControllerDescriptor(nil))
-
-	register(newEndpointsControllerDescriptor())
-	register(newEndpointSliceControllerDescriptor())
-	register(newEndpointSliceMirroringControllerDescriptor())
-	register(newReplicationControllerDescriptor())
-	register(newPodGarbageCollectorControllerDescriptor())
-	register(newResourceQuotaControllerDescriptor())
-	register(newNamespaceControllerDescriptor())
-	register(newServiceAccountControllerDescriptor())
-	register(newGarbageCollectorControllerDescriptor())
-	register(newDaemonSetControllerDescriptor())
-	register(newJobControllerDescriptor())
-	register(newDeploymentControllerDescriptor())
-	register(newReplicaSetControllerDescriptor())
-	register(newHorizontalPodAutoscalerControllerDescriptor())
-	register(newDisruptionControllerDescriptor())
-	register(newStatefulSetControllerDescriptor())
-	register(newCronJobControllerDescriptor())
-	register(newCertificateSigningRequestSigningControllerDescriptor())
-	register(newCertificateSigningRequestApprovingControllerDescriptor())
-	register(newCertificateSigningRequestCleanerControllerDescriptor())
-	register(newPodCertificateRequestCleanerControllerDescriptor())
-	register(newTTLControllerDescriptor())
-	register(newBootstrapSignerControllerDescriptor())
-	register(newTokenCleanerControllerDescriptor())
-	register(newNodeIpamControllerDescriptor())
-	register(newNodeLifecycleControllerDescriptor())
-
-	register(newServiceLBControllerDescriptor())          // cloud provider controller
-	register(newNodeRouteControllerDescriptor())          // cloud provider controller
-	register(newCloudNodeLifecycleControllerDescriptor()) // cloud provider controller
-
-	register(newPersistentVolumeBinderControllerDescriptor())
-	register(newPersistentVolumeAttachDetachControllerDescriptor())
-	register(newPersistentVolumeExpanderControllerDescriptor())
-	register(newClusterRoleAggregrationControllerDescriptor())
-	register(newPersistentVolumeClaimProtectionControllerDescriptor())
-	register(newPersistentVolumeProtectionControllerDescriptor())
-	register(newVolumeAttributesClassProtectionControllerDescriptor())
-	register(newTTLAfterFinishedControllerDescriptor())
-	register(newRootCACertificatePublisherControllerDescriptor())
-	register(newKubeAPIServerSignerClusterTrustBundledPublisherDescriptor())
-	register(newEphemeralVolumeControllerDescriptor())
-
-	// feature gated
-	register(newStorageVersionGarbageCollectorControllerDescriptor())
-	register(newResourceClaimControllerDescriptor())
-	register(newDeviceTaintEvictionControllerDescriptor())
-	register(newLegacyServiceAccountTokenCleanerControllerDescriptor())
-	register(newValidatingAdmissionPolicyStatusControllerDescriptor())
-	register(newTaintEvictionControllerDescriptor())
-	register(newServiceCIDRsControllerDescriptor())
-	register(newStorageVersionMigratorControllerDescriptor())
-	register(newSELinuxWarningControllerDescriptor())
-
-	for _, alias := range aliases.UnsortedList() {
-		if _, ok := controllers[alias]; ok {
-			panic(fmt.Sprintf("alias %q conflicts with a controller name", alias))
-		}
-	}
-
-	return controllers
 }
 
 // CreateControllerContext creates a context struct containing references to resources needed by the
@@ -893,6 +616,11 @@ func BuildControllers(ctx context.Context, controllerCtx ControllerContext, cont
 			continue
 		}
 
+		if !controllerCtx.IsControllerEnabled(controllerDesc) {
+			logger.Info("Warning: controller is disabled", "controller", controllerDesc.Name())
+			continue
+		}
+
 		if err := buildController(controllerDesc); err != nil {
 			return nil, err
 		}
@@ -1006,75 +734,6 @@ func RunControllers(ctx context.Context, controllerCtx ControllerContext, contro
 		logger.Info("Controller shutdown timeout reached", "timeout", shutdownTimeout, "runningControllers", running)
 		return false
 	}
-}
-
-// serviceAccountTokenControllerStarter is special because it must run first to set up permissions for other controllers.
-// It cannot use the "normal" client builder, so it tracks its own.
-func newServiceAccountTokenControllerDescriptor(rootClientBuilder clientbuilder.ControllerClientBuilder) *ControllerDescriptor {
-	return &ControllerDescriptor{
-		name:    names.ServiceAccountTokenController,
-		aliases: []string{"serviceaccount-token"},
-		constructor: func(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
-			return newServiceAccountTokenController(ctx, controllerContext, controllerName, rootClientBuilder)
-		},
-		// This controller is started manually before any other controller.
-		requiresSpecialHandling: true,
-	}
-}
-
-func newServiceAccountTokenController(
-	ctx context.Context, controllerContext ControllerContext, controllerName string,
-	rootClientBuilder clientbuilder.ControllerClientBuilder,
-) (Controller, error) {
-	if len(controllerContext.ComponentConfig.SAController.ServiceAccountKeyFile) == 0 {
-		klog.FromContext(ctx).Info("Controller is disabled because there is no private key", "controller", controllerName)
-		return nil, nil
-	}
-
-	privateKey, err := keyutil.PrivateKeyFromFile(controllerContext.ComponentConfig.SAController.ServiceAccountKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("error reading key for service account token controller: %w", err)
-	}
-
-	var rootCA []byte
-	if controllerContext.ComponentConfig.SAController.RootCAFile != "" {
-		if rootCA, err = readCA(controllerContext.ComponentConfig.SAController.RootCAFile); err != nil {
-			return nil, fmt.Errorf("error parsing root-ca-file at %s: %w", controllerContext.ComponentConfig.SAController.RootCAFile, err)
-		}
-	} else {
-		config, err := rootClientBuilder.Config("tokens-controller")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create Kubernetes client config for %q: %w", "tokens-controller", err)
-		}
-		rootCA = config.CAData
-	}
-
-	client, err := rootClientBuilder.Client("tokens-controller")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Kubernetes client for %q: %w", "tokens-controller", err)
-	}
-
-	tokenGenerator, err := serviceaccount.JWTTokenGenerator(serviceaccount.LegacyIssuer, privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build token generator: %w", err)
-	}
-	tokenController, err := serviceaccountcontroller.NewTokensController(
-		klog.FromContext(ctx),
-		controllerContext.InformerFactory.Core().V1().ServiceAccounts(),
-		controllerContext.InformerFactory.Core().V1().Secrets(),
-		client,
-		serviceaccountcontroller.TokensControllerOptions{
-			TokenGenerator: tokenGenerator,
-			RootCA:         rootCA,
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("error creating Tokens controller: %w", err)
-	}
-
-	return newNamedRunnableFunc(func(ctx context.Context) {
-		tokenController.Run(ctx, int(controllerContext.ComponentConfig.SAController.ConcurrentSATokenSyncs))
-	}, controllerName), nil
 }
 
 func readCA(file string) ([]byte, error) {

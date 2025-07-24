@@ -65,5 +65,5 @@ func newDisruptionController(ctx context.Context, controllerContext ControllerCo
 		scaleClient,
 		client.Discovery(),
 	)
-	return newNamedRunnableFunc(dc.Run, controllerName), nil
+	return newControllerLoop(dc.Run, controllerName), nil
 }

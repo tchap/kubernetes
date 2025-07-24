@@ -70,16 +70,16 @@ func newCertificateSigningRequestSigningController(ctx context.Context, controll
 	csrInformer := controllerContext.InformerFactory.Certificates().V1().CertificateSigningRequests()
 	certTTL := controllerContext.ComponentConfig.CSRSigningController.ClusterSigningDuration.Duration
 
-	var rx runnables
+	var rx []runFunc
 	if kubeletServingSignerCertFile, kubeletServingSignerKeyFile := getKubeletServingSignerFiles(controllerContext.ComponentConfig.CSRSigningController); len(kubeletServingSignerCertFile) > 0 || len(kubeletServingSignerKeyFile) > 0 {
 		kubeletServingSigner, err := signer.NewKubeletServingCSRSigningController(ctx, c, csrInformer, kubeletServingSignerCertFile, kubeletServingSignerKeyFile, certTTL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to init kubernetes.io/kubelet-serving certificate controller: %w", err)
 		}
 
-		rx = append(rx, runnableFunc(func(ctx context.Context) {
+		rx = append(rx, func(ctx context.Context) {
 			kubeletServingSigner.Run(ctx, 5)
-		}))
+		})
 	} else {
 		logger.Info("Skipping CSR signer controller because specific files were specified for other signers and not this one", "controller", "kubernetes.io/kubelet-serving")
 	}
@@ -90,9 +90,9 @@ func newCertificateSigningRequestSigningController(ctx context.Context, controll
 			return nil, fmt.Errorf("failed to init kubernetes.io/kube-apiserver-client-kubelet certificate controller: %w", err)
 		}
 
-		rx = append(rx, runnableFunc(func(ctx context.Context) {
+		rx = append(rx, func(ctx context.Context) {
 			kubeletClientSigner.Run(ctx, 5)
-		}))
+		})
 	} else {
 		logger.Info("Skipping CSR signer controller because specific files were specified for other signers and not this one", "controller", "kubernetes.io/kube-apiserver-client-kubelet")
 	}
@@ -103,9 +103,9 @@ func newCertificateSigningRequestSigningController(ctx context.Context, controll
 			return nil, fmt.Errorf("failed to init kubernetes.io/kube-apiserver-client certificate controller: %w", err)
 		}
 
-		rx = append(rx, runnableFunc(func(ctx context.Context) {
+		rx = append(rx, func(ctx context.Context) {
 			kubeAPIServerClientSigner.Run(ctx, 5)
-		}))
+		})
 	} else {
 		logger.Info("Skipping CSR signer controller because specific files were specified for other signers and not this one", "controller", "kubernetes.io/kube-apiserver-client")
 	}
@@ -116,14 +116,14 @@ func newCertificateSigningRequestSigningController(ctx context.Context, controll
 			return nil, fmt.Errorf("failed to init kubernetes.io/legacy-unknown certificate controller: %w", err)
 		}
 
-		rx = append(rx, runnableFunc(func(ctx context.Context) {
+		rx = append(rx, func(ctx context.Context) {
 			legacyUnknownSigner.Run(ctx, 5)
-		}))
+		})
 	} else {
 		logger.Info("Skipping CSR signer controller because specific files were specified for other signers and not this one", "controller", "kubernetes.io/legacy-unknown")
 	}
 
-	return newNamedRunnable(rx, controllerName), nil
+	return newControllerLoop(concurrentRun(rx...), controllerName), nil
 }
 
 func areKubeletServingSignerFilesSpecified(config csrsigningconfig.CSRSigningControllerConfiguration) bool {
@@ -202,7 +202,7 @@ func newCertificateSigningRequestApprovingController(ctx context.Context, contro
 		client,
 		controllerContext.InformerFactory.Certificates().V1().CertificateSigningRequests(),
 	)
-	return newNamedRunnableFunc(func(ctx context.Context) {
+	return newControllerLoop(func(ctx context.Context) {
 		ac.Run(ctx, 5)
 	}, controllerName), nil
 }
@@ -224,7 +224,7 @@ func newCertificateSigningRequestCleanerController(ctx context.Context, controll
 		client.CertificatesV1().CertificateSigningRequests(),
 		controllerContext.InformerFactory.Certificates().V1().CertificateSigningRequests(),
 	)
-	return newNamedRunnableFunc(func(ctx context.Context) {
+	return newControllerLoop(func(ctx context.Context) {
 		cc.Run(ctx, 1)
 	}, controllerName), nil
 }
@@ -247,7 +247,7 @@ func newPodCertificateRequestCleanerController(ctx context.Context, controllerCo
 		15*time.Minute, // We expect all PodCertificateRequest flows to complete faster than this.
 		5*time.Minute,
 	)
-	return newNamedRunnableFunc(func(ctx context.Context) {
+	return newControllerLoop(func(ctx context.Context) {
 		cleaner.Run(ctx, 1)
 	}, controllerName), nil
 }
@@ -281,7 +281,7 @@ func newRootCACertificatePublisherController(ctx context.Context, controllerCont
 		return nil, fmt.Errorf("error creating root CA certificate publisher: %w", err)
 	}
 
-	return newNamedRunnableFunc(func(ctx context.Context) {
+	return newControllerLoop(func(ctx context.Context) {
 		sac.Run(ctx, 1)
 	}, controllerName), nil
 }
@@ -349,7 +349,7 @@ func newKubeAPIServerSignerClusterTrustBundledPublisherController(
 		return nil, nil
 	}
 
-	return newNamedRunnableFunc(runner.Run, controllerName), nil
+	return newControllerLoop(runner.Run, controllerName), nil
 }
 
 func clusterTrustBundlesAvailable(client kubernetes.Interface, schemaVersion schema.GroupVersion) (bool, error) {

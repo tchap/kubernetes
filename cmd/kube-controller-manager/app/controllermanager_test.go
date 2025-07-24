@@ -209,7 +209,7 @@ func TestTaintEvictionControllerGating(t *testing.T) {
 			taintEvictionControllerDescriptor := NewControllerDescriptors()[names.TaintEvictionController]
 			taintEvictionControllerDescriptor.constructor = func(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
 				initFuncCalled = true
-				return newNamedRunnableFunc(func(ctx context.Context) {}, controllerName), nil
+				return newControllerLoop(func(ctx context.Context) {}, controllerName), nil
 			}
 
 			var healthChecks mockHealthCheckAdder
@@ -241,7 +241,7 @@ func TestNoCloudProviderControllerStarted(t *testing.T) {
 		}
 
 		controller.constructor = func(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
-			return newNamedRunnableFunc(func(ctx context.Context) {
+			return newControllerLoop(func(ctx context.Context) {
 				t.Error("Controller should not be started:", controllerName)
 			}, controllerName), nil
 		}
@@ -265,7 +265,7 @@ func TestRunControllers(t *testing.T) {
 		{
 			name: "clean shutdown",
 			newController: func(testCtx context.Context) Controller {
-				return newNamedRunnableFunc(func(ctx context.Context) {
+				return newControllerLoop(func(ctx context.Context) {
 					<-ctx.Done()
 				}, "controller-A")
 			},
@@ -275,7 +275,7 @@ func TestRunControllers(t *testing.T) {
 		{
 			name: "shutdown timeout",
 			newController: func(testCtx context.Context) Controller {
-				return newNamedRunnableFunc(func(ctx context.Context) {
+				return newControllerLoop(func(ctx context.Context) {
 					<-testCtx.Done()
 				}, "controller-A")
 			},
