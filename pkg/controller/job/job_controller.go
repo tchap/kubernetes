@@ -261,12 +261,19 @@ func (jm *Controller) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(workers * 2)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, jm.worker, time.Second)
-		go wait.UntilWithContext(ctx, jm.orphanWorker, time.Second)
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, jm.worker, time.Second)
+		}()
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, jm.orphanWorker, time.Second)
+		}()
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 // getPodJobs returns a list of Jobs that potentially match a Pod.

@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	apps "k8s.io/api/apps/v1"
@@ -177,11 +178,15 @@ func (dc *DeploymentController) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, dc.worker, time.Second)
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, dc.worker, time.Second)
+		}()
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 func (dc *DeploymentController) addDeployment(logger klog.Logger, obj interface{}) {

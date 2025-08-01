@@ -165,8 +165,7 @@ func (e *Signer) Run(ctx context.Context) {
 
 	logger := klog.FromContext(ctx)
 	logger.V(5).Info("Starting workers")
-	go wait.UntilWithContext(ctx, e.serviceConfigMapQueue, 0)
-	<-ctx.Done()
+	wait.UntilWithContext(ctx, e.serviceConfigMapQueue, 0)
 	logger.V(1).Info("Shutting down")
 }
 

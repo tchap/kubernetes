@@ -121,9 +121,7 @@ func (tc *TokenCleaner) Run(ctx context.Context) {
 		return
 	}
 
-	go wait.UntilWithContext(ctx, tc.worker, 10*time.Second)
-
-	<-ctx.Done()
+	wait.UntilWithContext(ctx, tc.worker, 10*time.Second)
 }
 
 func (tc *TokenCleaner) enqueueSecrets(obj interface{}) {

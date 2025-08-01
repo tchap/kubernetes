@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -149,11 +150,15 @@ func (jm *ControllerV2) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, jm.worker, time.Second)
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, jm.worker, time.Second)
+		}()
 	}
-
-	<-ctx.Done()
+	defer wg.Wait()
 }
 
 func (jm *ControllerV2) worker(ctx context.Context) {
