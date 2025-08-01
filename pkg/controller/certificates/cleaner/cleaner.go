@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -83,11 +84,15 @@ func (ccc *CSRCleanerController) Run(ctx context.Context, workers int) {
 	logger.Info("Starting CSR cleaner controller")
 	defer logger.Info("Shutting down CSR cleaner controller")
 
+	var wg sync.WaitGroup
+	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, ccc.worker, pollingInterval)
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, ccc.worker, pollingInterval)
+		}()
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 // worker runs a thread that dequeues CSRs, handles them, and marks them done.
