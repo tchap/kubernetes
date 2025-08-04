@@ -19,6 +19,7 @@ package endpointslice
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -285,14 +286,22 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	logger.V(2).Info("Starting service queue worker threads", "total", workers)
+	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go wait.Until(func() { c.serviceQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
+		go func() {
+			defer wg.Done()
+			wait.Until(func() { c.serviceQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
+		}()
 	}
 	logger.V(2).Info("Starting topology queue worker threads", "total", 1)
-	go wait.Until(func() { c.topologyQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
-
-	<-ctx.Done()
+	go func() {
+		defer wg.Done()
+		wait.Until(func() { c.topologyQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
+	}()
 }
 
 // serviceQueueWorker runs a worker thread that just dequeues items, processes
