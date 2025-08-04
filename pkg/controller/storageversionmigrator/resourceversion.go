@@ -129,9 +129,7 @@ func (rv *ResourceVersionController) Run(ctx context.Context) {
 		return
 	}
 
-	go wait.UntilWithContext(ctx, rv.worker, time.Second)
-
-	<-ctx.Done()
+	wait.UntilWithContext(ctx, rv.worker, time.Second)
 }
 
 func (rv *ResourceVersionController) worker(ctx context.Context) {
