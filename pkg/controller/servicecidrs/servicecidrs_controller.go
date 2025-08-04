@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/netip"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -141,10 +142,15 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.worker, c.workerLoopPeriod)
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, c.worker, c.workerLoopPeriod)
+		}()
 	}
-	<-ctx.Done()
+	wg.Wait()
 }
 
 func (c *Controller) addServiceCIDR(obj interface{}) {
