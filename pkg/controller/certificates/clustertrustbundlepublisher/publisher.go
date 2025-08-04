@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	certificatesv1alpha1 "k8s.io/api/certificates/v1alpha1"
@@ -278,7 +279,14 @@ func (p *ClusterTrustBundlePublisher[T]) Run(ctx context.Context) {
 	logger.Info("Starting ClusterTrustBundle CA cert publisher controller")
 	defer logger.Info("Shutting down ClusterTrustBundle CA cert publisher controller")
 
-	go p.ctbInformer.Run(ctx.Done())
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.ctbInformer.Run(ctx.Done())
+	}()
 
 	if !cache.WaitForNamedCacheSync("cluster trust bundle", ctx.Done(), p.ctbListerSynced) {
 		return
@@ -286,9 +294,11 @@ func (p *ClusterTrustBundlePublisher[T]) Run(ctx context.Context) {
 
 	// init the signer syncer
 	p.queue.Add("")
-	go wait.UntilWithContext(ctx, p.runWorker(), time.Second)
-
-	<-ctx.Done()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		wait.UntilWithContext(ctx, p.runWorker(), time.Second)
+	}()
 }
 
 func (p *ClusterTrustBundlePublisher[T]) runWorker() func(context.Context) {
