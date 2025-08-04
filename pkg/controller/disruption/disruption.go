@@ -19,6 +19,7 @@ package disruption
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	apps "k8s.io/api/apps/v1beta1"
@@ -472,11 +473,21 @@ func (dc *DisruptionController) Run(ctx context.Context) {
 		return
 	}
 
-	go wait.UntilWithContext(ctx, dc.worker, time.Second)
-	go wait.Until(dc.recheckWorker, time.Second, ctx.Done())
-	go wait.UntilWithContext(ctx, dc.stalePodDisruptionWorker, time.Second)
-
-	<-ctx.Done()
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		wait.UntilWithContext(ctx, dc.worker, time.Second)
+	}()
+	go func() {
+		defer wg.Done()
+		wait.Until(dc.recheckWorker, time.Second, ctx.Done())
+	}()
+	go func() {
+		defer wg.Done()
+		wait.UntilWithContext(ctx, dc.stalePodDisruptionWorker, time.Second)
+	}()
+	wg.Wait()
 }
 
 func (dc *DisruptionController) addDB(logger klog.Logger, obj interface{}) {
