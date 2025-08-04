@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -177,11 +178,20 @@ func (e *TokensController) Run(ctx context.Context, workers int) {
 
 	logger := klog.FromContext(ctx)
 	logger.V(5).Info("Starting workers")
+
+	var wg sync.WaitGroup
+	wg.Add(workers * 2)
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, e.syncServiceAccount, 0)
-		go wait.UntilWithContext(ctx, e.syncSecret, 0)
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, e.syncServiceAccount, 0)
+		}()
+		go func() {
+			defer wg.Done()
+			wait.UntilWithContext(ctx, e.syncSecret, 0)
+		}()
 	}
-	<-ctx.Done()
+	wg.Wait()
 	logger.V(1).Info("Shutting down")
 }
 
