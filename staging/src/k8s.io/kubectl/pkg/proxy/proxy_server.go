@@ -165,7 +165,7 @@ func makeUpgradeTransport(config *rest.Config, keepalive time.Duration) (proxy.U
 			Timeout:   30 * time.Second,
 			KeepAlive: keepalive,
 		}).DialContext,
-		Proxy: config.Proxy,
+		//Proxy: config.Proxy,
 	})
 
 	upgrader, err := transport.HTTPWrappersForConfig(transportConfig, proxy.MirrorRequest)
