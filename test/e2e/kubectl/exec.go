@@ -23,7 +23,6 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -176,18 +175,24 @@ var _ = SIGDescribe("Kubectl exec", func() {
 		err = clientcmd.WriteToFile(*config, kubeconfigPath)
 		framework.ExpectNoError(err, "Failed to write kubeconfig with proxy")
 
-		// Save original KUBECONFIG and restore it later
-		originalKubeconfig := os.Getenv("KUBECONFIG")
+		ginkgo.By("Creating REST config from proxy-enabled kubeconfig")
+
+		// Load the proxy-enabled kubeconfig and convert to rest.Config
+		clientConfig, err := clientcmd.LoadFromFile(kubeconfigPath)
+		framework.ExpectNoError(err, "Failed to load proxy kubeconfig")
+
+		restConfigWithProxy, err := clientcmd.NewDefaultClientConfig(*clientConfig, &clientcmd.ConfigOverrides{}).ClientConfig()
+		framework.ExpectNoError(err, "Failed to create REST config from proxy kubeconfig")
+
+		// Store original framework config and restore it later
+		originalConfig := f.ClientConfig()
 		defer func() {
-			if originalKubeconfig != "" {
-				os.Setenv("KUBECONFIG", originalKubeconfig)
-			} else {
-				os.Unsetenv("KUBECONFIG")
-			}
+			ginkgo.By("Restoring original client config")
+			f.SetClientConfig(originalConfig)
 		}()
 
-		ginkgo.By("Setting KUBECONFIG to use proxy configuration")
-		os.Setenv("KUBECONFIG", kubeconfigPath)
+		ginkgo.By("Setting framework to use proxy-enabled client config")
+		f.SetClientConfig(restConfigWithProxy)
 
 		// Reset proxy tracking
 		atomic.StoreInt64(&proxyRequestCount, 0)
