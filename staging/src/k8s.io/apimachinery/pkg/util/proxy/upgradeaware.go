@@ -351,7 +351,7 @@ func (h *UpgradeAwareHandler) tryUpgrade(w http.ResponseWriter, req *http.Reques
 		clone.URL = u
 	}
 
-	klog.V(6).Infof("Connecting to backend proxy (direct dial) %s\n  Headers: %v", &location, clone.Header)
+	klog.V(6).Infof("Connecting to backend proxy (direct dial) %s\n  Headers: %v", clone.URL, clone.Header)
 	klog.V(6).Infof("UpgradeAwareProxy: dialing for SPDY upgrade with headers: %v", clone.Header)
 
 	backendConn, err = h.DialForUpgrade(clone)
