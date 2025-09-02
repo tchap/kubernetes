@@ -200,6 +200,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		}
 
 		// Run kubectl exec.
+		ginkgo.By("Run kubectl exec")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		stdout, stderr, err := e2epod.ExecWithOptionsContext(ctx, f, e2epod.ExecOptions{
