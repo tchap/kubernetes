@@ -202,7 +202,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		// Run kubectl exec.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _, err = e2epod.ExecWithOptionsContext(ctx, f, e2epod.ExecOptions{
+		stdout, stderr, err := e2epod.ExecWithOptionsContext(ctx, f, e2epod.ExecOptions{
 			Command:            []string{"echo", "hello-proxy"},
 			Namespace:          f.Namespace.Name,
 			PodName:            pod.Name,
@@ -213,8 +213,14 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			PreserveWhitespace: false,
 		})
 		framework.ExpectNoError(err, "Failed to kubectl exec")
+		if len(stdout) > 0 {
+			framework.Logf("kubectl exec stdout: %s", stdout)
+		}
+		if len(stderr) > 0 {
+			framework.Logf("kubectl exec stderr: %s", stderr)
+		}
 
-		// The key validation: verify that our test proxy server received exec requests
+		// The key validation: verify that our test proxy server received exec requests.
 		requestCount := atomic.LoadInt64(&proxyRequestCount)
 		execCount := atomic.LoadInt64(&execRequestCount)
 		framework.Logf("Test proxy received %d total requests (%d exec requests)", requestCount, execCount)
