@@ -45,31 +45,29 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 
 	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 	f.It("should use proxy when configured in kubeconfig", func(ctx context.Context) {
-		// Create a test pod first
+		// Create pod to exec into.
 		ginkgo.By("Creating a test pod to exec into")
 		ns := f.Namespace.Name
 		podName := "test-proxy-exec-pod"
 		pod := e2epod.NewAgnhostPod(ns, podName, nil, nil, nil)
 		pod = e2epod.NewPodClient(f).CreateSync(ctx, pod)
 
-		// Load current config.
-		currentConfig, err := framework.LoadConfig()
+		// Load current config. This is supposed to be used for kubectl proxy only.
+		proxyConfig, err := framework.LoadConfig()
 		framework.ExpectNoError(err, "Failed to load current cluster config")
 
-		apiServerURL, err := url.Parse(currentConfig.Host)
+		apiServerURL, err := url.Parse(proxyConfig.Host)
 		framework.ExpectNoError(err, "Failed to parse API server URL")
 
-		// Create a reverse proxy that forwards to the real API server
+		// Create a reverse proxy that forwards to the real API server.
 		var (
 			proxyRequestCount int64
 			execRequestCount  int64
 		)
 		reverseProxy := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
-				// Increment request counter
+				// Update request metrics.
 				atomic.AddInt64(&proxyRequestCount, 1)
-
-				// Track exec-specific requests
 				if strings.Contains(pr.In.URL.Path, "/exec") {
 					atomic.AddInt64(&execRequestCount, 1)
 				}
@@ -77,11 +75,11 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 				framework.Logf("Proxy forwarding request: %s %s -> %s",
 					pr.In.Method, pr.In.URL.Path, apiServerURL.String())
 
-				// Forward to the real API server
+				// Forward to the real API server.
 				pr.SetURL(apiServerURL)
 				pr.Out.Host = apiServerURL.Host
 
-				// Copy authentication headers from the original request
+				// Copy authentication headers from the original request.
 				if auth := pr.In.Header.Get("Authorization"); auth != "" {
 					pr.Out.Header.Set("Authorization", auth)
 				}
@@ -92,8 +90,8 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			},
 			Transport: func() http.RoundTripper {
 				// Create a transport that can handle the test API server's TLS
-				if currentConfig.Transport != nil {
-					return currentConfig.Transport
+				if proxyConfig.Transport != nil {
+					return proxyConfig.Transport
 				}
 				// Fallback for test environments
 				return &http.Transport{
@@ -110,7 +108,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		proxyURL, err := url.Parse(proxyServer.URL)
 		framework.ExpectNoError(err, "Failed to parse proxy URL")
 
-		// Create a temporary kubeconfig with proxy configuration
+		// Create a temporary kubeconfig with proxy configuration.
 		tempDir := ginkgo.GinkgoT().TempDir()
 		kubeconfigPath := filepath.Join(tempDir, "kubeconfig-with-proxy")
 
@@ -118,8 +116,8 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		config := &clientcmdapi.Config{
 			Clusters: map[string]*clientcmdapi.Cluster{
 				"test-cluster": {
-					Server:                   currentConfig.Host,
-					CertificateAuthorityData: currentConfig.CAData,
+					Server:                   proxyConfig.Host,
+					CertificateAuthorityData: proxyConfig.CAData,
 					ProxyURL:                 proxyURL.String(),
 				},
 			},
@@ -131,9 +129,9 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			},
 			AuthInfos: map[string]*clientcmdapi.AuthInfo{
 				"test-user": {
-					ClientCertificateData: currentConfig.CertData,
-					ClientKeyData:         currentConfig.KeyData,
-					Token:                 currentConfig.BearerToken,
+					ClientCertificateData: proxyConfig.CertData,
+					ClientKeyData:         proxyConfig.KeyData,
+					Token:                 proxyConfig.BearerToken,
 				},
 			},
 			CurrentContext: "test-context",
