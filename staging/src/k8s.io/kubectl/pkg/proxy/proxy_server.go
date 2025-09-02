@@ -214,6 +214,7 @@ func NewProxyHandler(apiProxyPrefix string, filter *FilterServer, cfg *rest.Conf
 	}
 	proxy := proxy.NewUpgradeAwareHandler(target, transport, false, false, responder)
 	proxy.UpgradeTransport = upgradeTransport
+	proxy.Proxy = cfg.Proxy
 	proxy.UseRequestLocation = true
 	proxy.UseLocationHost = true
 	proxy.AppendLocationPath = appendLocationPath

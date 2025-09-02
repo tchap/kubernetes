@@ -153,7 +153,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 
 		{
 			tk := e2ekubectl.NewTestKubeconfig("", "", kubeProxyConfigPath, "", framework.TestContext.KubectlPath, "")
-			proxyCmd := tk.KubectlCmd("proxy", "-p", strconv.Itoa(proxyPort), "--reject-paths", "")
+			proxyCmd := tk.KubectlCmd("proxy", "-p", strconv.Itoa(proxyPort), "--reject-paths", "", "-v=6")
 
 			stdout, stderr, err := framework.StartCmdAndStreamOutput(proxyCmd)
 			if err != nil {

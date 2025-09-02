@@ -67,6 +67,8 @@ type UpgradeAwareHandler struct {
 	// UpgradeTransport, if specified, will be used as the backend transport when upgrade requests are provided.
 	// This allows clients to disable HTTP/2.
 	UpgradeTransport UpgradeRequestRoundTripper
+	// Proxy can be used to rewrite the target request URL.
+	Proxy func(*http.Request) (*url.URL, error)
 	// WrapTransport indicates whether the provided Transport should be wrapped with default proxy transport behavior (URL rewriting, X-Forwarded-* header setting)
 	WrapTransport bool
 	// UseRequestLocation will use the incoming request URL when talking to the backend server.
@@ -329,15 +331,29 @@ func (h *UpgradeAwareHandler) tryUpgrade(w http.ResponseWriter, req *http.Reques
 	}
 
 	clone := utilnet.CloneRequest(req)
-	// Only append X-Forwarded-For in the upgrade path, since httputil.NewSingleHostReverseProxy
-	// handles this in the non-upgrade path.
-	utilnet.AppendForwardedForHeader(clone)
-	klog.V(6).Infof("Connecting to backend proxy (direct dial) %s\n  Headers: %v", &location, clone.Header)
+	clone.URL = &location
 	if h.UseLocationHost {
 		clone.Host = h.Location.Host
 	}
-	clone.URL = &location
+
+	// Only append X-Forwarded-For in the upgrade path, since httputil.NewSingleHostReverseProxy
+	// handles this in the non-upgrade path.
+	utilnet.AppendForwardedForHeader(clone)
+
+	if h.Proxy != nil {
+		u, err := h.Proxy(clone)
+		if err != nil {
+			klog.V(6).Infof("Error proxying request: %v", err)
+			h.Responder.Error(w, clone, err)
+			return true
+		}
+
+		clone.URL = u
+	}
+
+	klog.V(6).Infof("Connecting to backend proxy (direct dial) %s\n  Headers: %v", &location, clone.Header)
 	klog.V(6).Infof("UpgradeAwareProxy: dialing for SPDY upgrade with headers: %v", clone.Header)
+
 	backendConn, err = h.DialForUpgrade(clone)
 	if err != nil {
 		klog.V(6).Infof("Proxy connection error: %v", err)
