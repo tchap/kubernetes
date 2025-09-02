@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -150,14 +151,20 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		proxyPort, err := getFreeProxyPort()
 		framework.ExpectNoError(err, "Failed to get free proxy port")
 
-		tk := e2ekubectl.NewTestKubeconfig("", "", kubeProxyConfigPath, "", framework.TestContext.KubectlPath, "")
-		proxyCmd := tk.KubectlCmd("proxy", "-p", strconv.Itoa(proxyPort), "--reject-paths", "")
+		{
+			tk := e2ekubectl.NewTestKubeconfig("", "", kubeProxyConfigPath, "", framework.TestContext.KubectlPath, "")
+			proxyCmd := tk.KubectlCmd("proxy", "-p", strconv.Itoa(proxyPort), "--reject-paths", "")
 
-		_, _, err = framework.StartCmdAndStreamOutput(proxyCmd)
-		if err != nil {
-			framework.Logf("kubectl proxy failed (may be due to TLS): %v", err)
+			stdout, stderr, err := framework.StartCmdAndStreamOutput(proxyCmd)
+			if err != nil {
+				framework.Logf("kubectl proxy failed (may be due to TLS): %v", err)
+			}
+			defer stdout.Close()
+			defer stderr.Close()
+			defer framework.TryKill(proxyCmd)
+			go io.Copy(ginkgo.GinkgoWriter, stdout)
+			go io.Copy(ginkgo.GinkgoWriter, stderr)
 		}
-		defer framework.TryKill(proxyCmd)
 
 		time.Sleep(3 * time.Second)
 
