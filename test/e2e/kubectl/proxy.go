@@ -35,6 +35,7 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -115,7 +116,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		tempDir := ginkgo.GinkgoT().TempDir()
 		kubeconfigPath := filepath.Join(tempDir, "kubeconfig-with-proxy")
 
-		// Build kubeconfig with proxy-url
+		// Build kubeconfig with proxy-url.
 		proxyConfig := clientcmdapi.Config{
 			Clusters: map[string]*clientcmdapi.Cluster{
 				"test-cluster": {
@@ -143,10 +144,6 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		err = clientcmd.WriteToFile(proxyConfig, kubeconfigPath)
 		framework.ExpectNoError(err, "Failed to write kubeconfig with proxy")
 
-		// Reset proxy tracking before starting
-		atomic.StoreInt64(&proxyRequestCount, 0)
-		atomic.StoreInt64(&execRequestCount, 0)
-
 		// Use the proxy-enabled kubeconfig for kubectl proxy.
 		ginkgo.By("Start kubectl proxy")
 
@@ -161,6 +158,8 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			framework.Logf("kubectl proxy failed (may be due to TLS): %v", err)
 		}
 		defer framework.TryKill(proxyCmd)
+
+		time.Sleep(5 * time.Second)
 
 		// Put together a config using kubectl proxy.
 		execConfig := clientcmdapi.Config{
@@ -190,6 +189,9 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			clientConfig, err := clientcmd.NewDefaultClientConfig(execConfig, &clientcmd.ConfigOverrides{}).ClientConfig()
 			framework.ExpectNoError(err, "Failed to create client config")
 			f.SetClientConfig(clientConfig)
+
+			f.ClientSet, err = clientset.NewForConfig(clientConfig)
+			framework.ExpectNoError(err)
 		}
 
 		// Run kubectl exec.
