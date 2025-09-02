@@ -37,11 +37,13 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = SIGDescribe("Kubectl proxy", func() {
 	f := framework.NewDefaultFramework("proxy")
 
+	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 	f.It("should use proxy when configured in kubeconfig", func(ctx context.Context) {
 		// Create a test pod first
 		ginkgo.By("Creating a test pod to exec into")
@@ -66,7 +68,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				// Increment request counter
 				atomic.AddInt64(&proxyRequestCount, 1)
-				
+
 				// Track exec-specific requests
 				if strings.Contains(pr.In.URL.Path, "/exec") {
 					atomic.AddInt64(&execRequestCount, 1)
