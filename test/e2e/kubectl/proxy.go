@@ -159,14 +159,13 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		}
 		defer framework.TryKill(proxyCmd)
 
-		time.Sleep(5 * time.Second)
+		time.Sleep(3 * time.Second)
 
 		// Put together a config using kubectl proxy.
 		execConfig := clientcmdapi.Config{
 			Clusters: map[string]*clientcmdapi.Cluster{
 				"test-cluster": {
-					Server:                   fmt.Sprintf("https://127.0.0.1:%d", proxyPort),
-					CertificateAuthorityData: currentConfig.CAData,
+					Server: fmt.Sprintf("http://127.0.0.1:%d", proxyPort),
 				},
 			},
 			Contexts: map[string]*clientcmdapi.Context{
@@ -190,8 +189,14 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			framework.ExpectNoError(err, "Failed to create client config")
 			f.SetClientConfig(clientConfig)
 
+			currentClientSet := f.ClientSet
 			f.ClientSet, err = clientset.NewForConfig(clientConfig)
 			framework.ExpectNoError(err)
+
+			defer func() {
+				f.SetClientConfig(currentConfig)
+				f.ClientSet = currentClientSet
+			}()
 		}
 
 		// Run kubectl exec.
@@ -216,7 +221,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 
 		// This is the core test - kubectl exec should have made requests through our proxy
 		gomega.Expect(requestCount).To(gomega.BeNumerically(">", 0),
-			"Expected kubectl exec to make requests through configured proxy-url - this validates the proxy-url fix")
+			"Expected kubectl exec to make requests through the configured proxy")
 	})
 })
 
