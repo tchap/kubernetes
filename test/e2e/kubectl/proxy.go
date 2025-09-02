@@ -48,7 +48,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 
 	f.NamespacePodSecurityLevel = admissionapi.LevelBaseline
 	f.It("should use proxy when configured in kubeconfig", func(ctx context.Context) {
-		// Create pod to exec into.
+		// Create the pod to exec into.
 		ginkgo.By("Creating a test pod to exec into")
 		ns := f.Namespace.Name
 		podName := "test-proxy-exec-pod"
@@ -62,29 +62,29 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		apiServerURL, err := url.Parse(currentConfig.Host)
 		framework.ExpectNoError(err, "Failed to parse API server URL")
 
-		// Create a reverse proxy that forwards to the real API server.
+		// Create a proxy that forwards to the real API server.
 		var (
 			proxyRequestCount int64
 			execRequestCount  int64
 		)
 		reverseProxy := &httputil.ReverseProxy{
-			Rewrite: func(pr *httputil.ProxyRequest) {
+			Rewrite: func(r *httputil.ProxyRequest) {
 				// Update request metrics.
 				atomic.AddInt64(&proxyRequestCount, 1)
-				if strings.Contains(pr.In.URL.Path, "/exec") {
+				if strings.Contains(r.In.URL.Path, "/exec") {
 					atomic.AddInt64(&execRequestCount, 1)
 				}
 
 				framework.Logf("Proxy forwarding request: %s %s -> %s",
-					pr.In.Method, pr.In.URL.Path, apiServerURL.String())
+					r.In.Method, r.In.URL.Path, apiServerURL.String())
 
 				// Forward to the real API server.
-				pr.SetURL(apiServerURL)
-				pr.Out.Host = apiServerURL.Host
+				r.SetURL(apiServerURL)
+				r.Out.Host = apiServerURL.Host
 
 				// Copy authentication headers from the original request.
-				if auth := pr.In.Header.Get("Authorization"); auth != "" {
-					pr.Out.Header.Set("Authorization", auth)
+				if auth := r.In.Header.Get("Authorization"); auth != "" {
+					r.Out.Header.Set("Authorization", auth)
 				}
 			},
 			ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
@@ -153,8 +153,8 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		proxyPort, err := getFreeProxyPort()
 		framework.ExpectNoError(err, "Failed to get free proxy port")
 
-		tk := e2ekubectl.NewTestKubeconfig("", "", kubeconfigPath, "", framework.TestContext.KubectlPath, f.Namespace.Name)
-		proxyCmd := tk.KubectlCmd("proxy", "-p", strconv.Itoa(proxyPort), "--disable-filter", "true", "--reject-paths", "")
+		tk := e2ekubectl.NewTestKubeconfig("", "", kubeconfigPath, "", framework.TestContext.KubectlPath, "")
+		proxyCmd := tk.KubectlCmd("proxy", "-p", strconv.Itoa(proxyPort), "--reject-paths", "")
 
 		_, _, err = framework.StartCmdAndStreamOutput(proxyCmd)
 		if err != nil {
