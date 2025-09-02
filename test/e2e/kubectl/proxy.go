@@ -21,6 +21,7 @@ package kubectl
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -160,6 +161,36 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			framework.Logf("kubectl proxy failed (may be due to TLS): %v", err)
 		}
 		defer framework.TryKill(proxyCmd)
+
+		// Put together a config using kubectl proxy.
+		execConfig := clientcmdapi.Config{
+			Clusters: map[string]*clientcmdapi.Cluster{
+				"test-cluster": {
+					Server:                   fmt.Sprintf("https://127.0.0.1:%d", proxyPort),
+					CertificateAuthorityData: currentConfig.CAData,
+				},
+			},
+			Contexts: map[string]*clientcmdapi.Context{
+				"test-context": {
+					Cluster:  "test-cluster",
+					AuthInfo: "test-user",
+				},
+			},
+			AuthInfos: map[string]*clientcmdapi.AuthInfo{
+				"test-user": {
+					ClientCertificateData: currentConfig.CertData,
+					ClientKeyData:         currentConfig.KeyData,
+					Token:                 currentConfig.BearerToken,
+				},
+			},
+			CurrentContext: "test-context",
+		}
+
+		{
+			clientConfig, err := clientcmd.NewDefaultClientConfig(execConfig, &clientcmd.ConfigOverrides{}).ClientConfig()
+			framework.ExpectNoError(err, "Failed to create client config")
+			f.SetClientConfig(clientConfig)
+		}
 
 		// Run kubectl exec.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
