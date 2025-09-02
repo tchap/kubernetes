@@ -21,11 +21,13 @@ package kubectl
 import (
 	"context"
 	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -53,10 +55,10 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		pod = e2epod.NewPodClient(f).CreateSync(ctx, pod)
 
 		// Load current config. This is supposed to be used for kubectl proxy only.
-		proxyConfig, err := framework.LoadConfig()
+		currentConfig, err := framework.LoadConfig()
 		framework.ExpectNoError(err, "Failed to load current cluster config")
 
-		apiServerURL, err := url.Parse(proxyConfig.Host)
+		apiServerURL, err := url.Parse(currentConfig.Host)
 		framework.ExpectNoError(err, "Failed to parse API server URL")
 
 		// Create a reverse proxy that forwards to the real API server.
@@ -90,8 +92,8 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			},
 			Transport: func() http.RoundTripper {
 				// Create a transport that can handle the test API server's TLS
-				if proxyConfig.Transport != nil {
-					return proxyConfig.Transport
+				if currentConfig.Transport != nil {
+					return currentConfig.Transport
 				}
 				// Fallback for test environments
 				return &http.Transport{
@@ -113,11 +115,11 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		kubeconfigPath := filepath.Join(tempDir, "kubeconfig-with-proxy")
 
 		// Build kubeconfig with proxy-url
-		config := &clientcmdapi.Config{
+		proxyConfig := clientcmdapi.Config{
 			Clusters: map[string]*clientcmdapi.Cluster{
 				"test-cluster": {
-					Server:                   proxyConfig.Host,
-					CertificateAuthorityData: proxyConfig.CAData,
+					Server:                   currentConfig.Host,
+					CertificateAuthorityData: currentConfig.CAData,
 					ProxyURL:                 proxyURL.String(),
 				},
 			},
@@ -129,49 +131,50 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			},
 			AuthInfos: map[string]*clientcmdapi.AuthInfo{
 				"test-user": {
-					ClientCertificateData: proxyConfig.CertData,
-					ClientKeyData:         proxyConfig.KeyData,
-					Token:                 proxyConfig.BearerToken,
+					ClientCertificateData: currentConfig.CertData,
+					ClientKeyData:         currentConfig.KeyData,
+					Token:                 currentConfig.BearerToken,
 				},
 			},
 			CurrentContext: "test-context",
 		}
 
-		err = clientcmd.WriteToFile(*config, kubeconfigPath)
+		err = clientcmd.WriteToFile(proxyConfig, kubeconfigPath)
 		framework.ExpectNoError(err, "Failed to write kubeconfig with proxy")
 
 		// Reset proxy tracking before starting
 		atomic.StoreInt64(&proxyRequestCount, 0)
 		atomic.StoreInt64(&execRequestCount, 0)
 
-		ginkgo.By("Performing kubectl exec with proxy-url configured kubeconfig")
+		// Use the proxy-enabled kubeconfig for kubectl proxy.
+		ginkgo.By("Start kubectl proxy")
 
-		// Use the proxy-enabled kubeconfig for kubectl exec
+		proxyPort, err := getFreeProxyPort()
+		framework.ExpectNoError(err, "Failed to get free proxy port")
+
 		tk := e2ekubectl.NewTestKubeconfig("", "", kubeconfigPath, "", framework.TestContext.KubectlPath, f.Namespace.Name)
-		execCmd := tk.KubectlCmd("exec", pod.Name, "--", "echo", "hello-proxy")
+		proxyCmd := tk.KubectlCmd("proxy", "-p", strconv.Itoa(proxyPort), "--disable-filter", "true", "--reject-paths", "")
 
-		// Execute the command
-		stdout, stderr, err := framework.StartCmdAndStreamOutput(execCmd)
+		_, _, err = framework.StartCmdAndStreamOutput(proxyCmd)
 		if err != nil {
-			framework.Logf("kubectl exec failed (may be due to TLS): %v", err)
+			framework.Logf("kubectl proxy failed (may be due to TLS): %v", err)
 		}
+		defer framework.TryKill(proxyCmd)
 
-		// Read any output
-		if stdout != nil {
-			buf := make([]byte, 1024)
-			if n, readErr := stdout.Read(buf); readErr == nil {
-				framework.Logf("kubectl exec stdout: %s", string(buf[:n]))
-			}
-		}
-		if stderr != nil {
-			buf := make([]byte, 1024)
-			if n, readErr := stderr.Read(buf); readErr == nil {
-				framework.Logf("kubectl exec stderr: %s", string(buf[:n]))
-			}
-		}
-
-		// Give some time for requests to complete
-		time.Sleep(3 * time.Second)
+		// Run kubectl exec.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _, err = e2epod.ExecWithOptionsContext(ctx, f, e2epod.ExecOptions{
+			Command:            []string{"echo", "hello-proxy"},
+			Namespace:          f.Namespace.Name,
+			PodName:            pod.Name,
+			ContainerName:      pod.Spec.Containers[0].Name,
+			Stdin:              nil,
+			CaptureStdout:      true,
+			CaptureStderr:      true,
+			PreserveWhitespace: false,
+		})
+		framework.ExpectNoError(err, "Failed to kubectl exec")
 
 		// The key validation: verify that our test proxy server received exec requests
 		requestCount := atomic.LoadInt64(&proxyRequestCount)
@@ -181,7 +184,19 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		// This is the core test - kubectl exec should have made requests through our proxy
 		gomega.Expect(requestCount).To(gomega.BeNumerically(">", 0),
 			"Expected kubectl exec to make requests through configured proxy-url - this validates the proxy-url fix")
-
-		framework.Logf("SUCCESS: kubectl exec used proxy-url configuration from kubeconfig")
 	})
 })
+
+func getFreeProxyPort() (int, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return 0, err
+	}
+
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
