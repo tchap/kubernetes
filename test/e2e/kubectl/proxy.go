@@ -114,10 +114,10 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 
 		// Create a temporary kubeconfig with proxy configuration.
 		tempDir := ginkgo.GinkgoT().TempDir()
-		kubeconfigPath := filepath.Join(tempDir, "kubeconfig-with-proxy")
+		kubeProxyConfigPath := filepath.Join(tempDir, "kubeconfig-with-proxy")
 
 		// Build kubeconfig with proxy-url.
-		proxyConfig := clientcmdapi.Config{
+		kubectlProxyConfig := clientcmdapi.Config{
 			Clusters: map[string]*clientcmdapi.Cluster{
 				"test-cluster": {
 					Server:                   currentConfig.Host,
@@ -141,7 +141,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 			CurrentContext: "test-context",
 		}
 
-		err = clientcmd.WriteToFile(proxyConfig, kubeconfigPath)
+		err = clientcmd.WriteToFile(kubectlProxyConfig, kubeProxyConfigPath)
 		framework.ExpectNoError(err, "Failed to write kubeconfig with proxy")
 
 		// Use the proxy-enabled kubeconfig for kubectl proxy.
@@ -150,7 +150,7 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		proxyPort, err := getFreeProxyPort()
 		framework.ExpectNoError(err, "Failed to get free proxy port")
 
-		tk := e2ekubectl.NewTestKubeconfig("", "", kubeconfigPath, "", framework.TestContext.KubectlPath, "")
+		tk := e2ekubectl.NewTestKubeconfig("", "", kubeProxyConfigPath, "", framework.TestContext.KubectlPath, "")
 		proxyCmd := tk.KubectlCmd("proxy", "-p", strconv.Itoa(proxyPort), "--reject-paths", "")
 
 		_, _, err = framework.StartCmdAndStreamOutput(proxyCmd)
@@ -203,14 +203,12 @@ var _ = SIGDescribe("Kubectl proxy", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		stdout, stderr, err := e2epod.ExecWithOptionsContext(ctx, f, e2epod.ExecOptions{
-			Command:            []string{"echo", "hello-proxy"},
-			Namespace:          f.Namespace.Name,
-			PodName:            pod.Name,
-			ContainerName:      pod.Spec.Containers[0].Name,
-			Stdin:              nil,
-			CaptureStdout:      true,
-			CaptureStderr:      true,
-			PreserveWhitespace: false,
+			Command:       []string{"echo", "hello-proxy"},
+			Namespace:     f.Namespace.Name,
+			PodName:       pod.Name,
+			ContainerName: pod.Spec.Containers[0].Name,
+			CaptureStdout: true,
+			CaptureStderr: true,
 		})
 		framework.ExpectNoError(err, "Failed to kubectl exec")
 		if len(stdout) > 0 {
