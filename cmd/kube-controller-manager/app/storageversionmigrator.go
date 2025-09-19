@@ -25,20 +25,21 @@ import (
 	"k8s.io/client-go/dynamic"
 	clientgofeaturegate "k8s.io/client-go/features"
 	"k8s.io/client-go/metadata"
+	"k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 	svm "k8s.io/kubernetes/pkg/controller/storageversionmigrator"
 	"k8s.io/kubernetes/pkg/features"
 )
 
-func newStorageVersionMigratorControllerDescriptor() *ControllerDescriptor {
-	return &ControllerDescriptor{
+func newStorageVersionMigratorControllerDescriptor() *controller.ControllerDescriptor {
+	return &controller.ControllerDescriptor{
 		name:        names.StorageVersionMigratorController,
 		aliases:     []string{"svm"},
 		constructor: newSVMController,
 	}
 }
 
-func newSVMController(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
+func newSVMController(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller.Controller, error) {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.StorageVersionMigrator) ||
 		!clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.InformerResourceVersion) {
 		return nil, nil
@@ -84,7 +85,7 @@ func newSVMController(ctx context.Context, controllerContext ControllerContext, 
 		return nil, fmt.Errorf("failed to create metadata client for %s: %w", controllerName, err)
 	}
 
-	return newControllerLoop(concurrentRun(
+	return controller.newControllerLoop(controller.concurrentRun(
 		svm.NewSVMController(
 			ctx,
 			client,

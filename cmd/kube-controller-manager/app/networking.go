@@ -23,13 +23,14 @@ import (
 	"context"
 
 	"k8s.io/component-base/featuregate"
+	"k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 	"k8s.io/kubernetes/pkg/controller/servicecidrs"
 	"k8s.io/kubernetes/pkg/features"
 )
 
-func newServiceCIDRsControllerDescriptor() *ControllerDescriptor {
-	return &ControllerDescriptor{
+func newServiceCIDRsControllerDescriptor() *controller.ControllerDescriptor {
+	return &controller.ControllerDescriptor{
 		name:        names.ServiceCIDRController,
 		constructor: newServiceCIDRsController,
 		requiredFeatureGates: []featuregate.Feature{
@@ -38,7 +39,7 @@ func newServiceCIDRsControllerDescriptor() *ControllerDescriptor {
 	}
 }
 
-func newServiceCIDRsController(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
+func newServiceCIDRsController(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller.Controller, error) {
 	client, err := controllerContext.NewClient("service-cidrs-controller")
 	if err != nil {
 		return nil, err
@@ -51,7 +52,7 @@ func newServiceCIDRsController(ctx context.Context, controllerContext Controller
 		controllerContext.InformerFactory.Networking().V1().IPAddresses(),
 		client,
 	)
-	return newControllerLoop(func(ctx context.Context) {
+	return controller.newControllerLoop(func(ctx context.Context) {
 		scc.Run(ctx, 5)
 	}, controllerName), nil
 }

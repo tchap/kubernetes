@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/version"
@@ -40,7 +41,7 @@ import (
 func TestControllerNamesConsistency(t *testing.T) {
 	controllerNameRegexp := regexp.MustCompile("^[a-z]([-a-z]*[a-z])?$")
 
-	for _, name := range KnownControllers() {
+	for _, name := range controller.KnownControllers() {
 		if !controllerNameRegexp.MatchString(name) {
 			t.Errorf("name consistency check failed: controller %q must consist of lower case alphabetic characters or '-', and must start and end with an alphabetic character", name)
 		}
@@ -104,7 +105,7 @@ func TestControllerNamesDeclaration(t *testing.T) {
 		names.SELinuxWarningController,
 	)
 
-	for _, name := range KnownControllers() {
+	for _, name := range controller.KnownControllers() {
 		if !declaredControllers.Has(name) {
 			t.Errorf("name declaration check failed: controller name %q should be declared in  \"controller_names.go\" and added to this test", name)
 		}
@@ -112,19 +113,19 @@ func TestControllerNamesDeclaration(t *testing.T) {
 }
 
 func TestNewControllerDescriptorsShouldNotPanic(t *testing.T) {
-	NewControllerDescriptors()
+	controller.NewControllerDescriptors()
 }
 
 func TestNewControllerDescriptorsAlwaysReturnsDescriptorsForAllControllers(t *testing.T) {
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllAlpha", false)
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllBeta", false)
 
-	controllersWithoutFeatureGates := KnownControllers()
+	controllersWithoutFeatureGates := controller.KnownControllers()
 
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllAlpha", true)
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, "AllBeta", true)
 
-	controllersWithFeatureGates := KnownControllers()
+	controllersWithFeatureGates := controller.KnownControllers()
 
 	if diff := cmp.Diff(controllersWithoutFeatureGates, controllersWithFeatureGates); diff != "" {
 		t.Errorf("unexpected controllers after enabling feature gates, NewControllerDescriptors should always return all controller descriptors. Controllers should define required feature gates in ControllerDescriptor.requiredFeatureGates. Diff of returned controllers:\n%s", diff)
@@ -144,7 +145,7 @@ func TestFeatureGatedControllersShouldNotDefineAliases(t *testing.T) {
 
 	}
 
-	for name, controller := range NewControllerDescriptors() {
+	for name, controller := range controller.NewControllerDescriptors() {
 		if len(controller.GetAliases()) == 0 {
 			continue
 		}
@@ -206,14 +207,14 @@ func TestTaintEvictionControllerGating(t *testing.T) {
 
 			initFuncCalled := false
 
-			taintEvictionControllerDescriptor := NewControllerDescriptors()[names.TaintEvictionController]
-			taintEvictionControllerDescriptor.constructor = func(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
+			taintEvictionControllerDescriptor := controller.NewControllerDescriptors()[names.TaintEvictionController]
+			taintEvictionControllerDescriptor.constructor = func(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller.Controller, error) {
 				initFuncCalled = true
-				return newControllerLoop(func(ctx context.Context) {}, controllerName), nil
+				return controller.newControllerLoop(func(ctx context.Context) {}, controllerName), nil
 			}
 
 			var healthChecks mockHealthCheckAdder
-			if err := runControllers(ctx, controllerCtx, map[string]*ControllerDescriptor{
+			if err := runControllers(ctx, controllerCtx, map[string]*controller.ControllerDescriptor{
 				names.TaintEvictionController: taintEvictionControllerDescriptor,
 			}, &healthChecks); err != nil {
 				t.Errorf("starting a TaintEvictionController controller should not return an error")
@@ -234,14 +235,14 @@ func TestNoCloudProviderControllerStarted(t *testing.T) {
 	_, ctx := ktesting.NewTestContext(t)
 	controllerCtx := ControllerContext{}
 	controllerCtx.ComponentConfig.Generic.Controllers = []string{"*"}
-	cpControllerDescriptors := make(map[string]*ControllerDescriptor)
-	for controllerName, controller := range NewControllerDescriptors() {
+	cpControllerDescriptors := make(map[string]*controller.ControllerDescriptor)
+	for controllerName, controller := range controller.NewControllerDescriptors() {
 		if !controller.IsCloudProviderController() {
 			continue
 		}
 
-		controller.constructor = func(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
-			return newControllerLoop(func(ctx context.Context) {
+		controller.constructor = func(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller.Controller, error) {
+			return controller.newControllerLoop(func(ctx context.Context) {
 				t.Error("Controller should not be started:", controllerName)
 			}, controllerName), nil
 		}
@@ -258,14 +259,14 @@ func TestNoCloudProviderControllerStarted(t *testing.T) {
 func TestRunControllers(t *testing.T) {
 	testCases := []struct {
 		name                     string
-		newController            func(ctx context.Context) Controller
+		newController            func(ctx context.Context) controller.Controller
 		shutdownTimeout          time.Duration
 		expectedCleanTermination bool
 	}{
 		{
 			name: "clean shutdown",
-			newController: func(testCtx context.Context) Controller {
-				return newControllerLoop(func(ctx context.Context) {
+			newController: func(testCtx context.Context) controller.Controller {
+				return controller.newControllerLoop(func(ctx context.Context) {
 					<-ctx.Done()
 				}, "controller-A")
 			},
@@ -274,8 +275,8 @@ func TestRunControllers(t *testing.T) {
 		},
 		{
 			name: "shutdown timeout",
-			newController: func(testCtx context.Context) Controller {
-				return newControllerLoop(func(ctx context.Context) {
+			newController: func(testCtx context.Context) controller.Controller {
+				return controller.newControllerLoop(func(ctx context.Context) {
 					<-testCtx.Done()
 				}, "controller-A")
 			},
@@ -298,7 +299,7 @@ func TestRunControllers(t *testing.T) {
 			ctx, cancelController := context.WithCancel(ctx)
 			cancelController()
 
-			cleanShutdown := RunControllers(ctx, controllerCtx, []Controller{tc.newController(testCtx)}, 0, tc.shutdownTimeout)
+			cleanShutdown := RunControllers(ctx, controllerCtx, []controller.Controller{tc.newController(testCtx)}, 0, tc.shutdownTimeout)
 			if cleanShutdown != tc.expectedCleanTermination {
 				t.Errorf("expected clean shutdown %v, got %v", tc.expectedCleanTermination, cleanShutdown)
 			}
@@ -316,7 +317,7 @@ func (m *mockHealthCheckAdder) AddHealthChecker(checks ...healthz.HealthChecker)
 
 func runControllers(
 	ctx context.Context, controllerCtx ControllerContext,
-	controllerDescriptors map[string]*ControllerDescriptor, healthzChecks HealthCheckAdder,
+	controllerDescriptors map[string]*controller.ControllerDescriptor, healthzChecks HealthCheckAdder,
 ) error {
 	controllers, err := BuildControllers(ctx, controllerCtx, controllerDescriptors, nil, healthzChecks)
 	if err != nil {

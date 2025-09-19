@@ -21,21 +21,23 @@ package app
 
 import (
 	"context"
+
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/scale"
+	"k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 	"k8s.io/kubernetes/pkg/controller/disruption"
 )
 
-func newDisruptionControllerDescriptor() *ControllerDescriptor {
-	return &ControllerDescriptor{
+func newDisruptionControllerDescriptor() *controller.ControllerDescriptor {
+	return &controller.ControllerDescriptor{
 		name:        names.DisruptionController,
 		aliases:     []string{"disruption"},
 		constructor: newDisruptionController,
 	}
 }
 
-func newDisruptionController(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
+func newDisruptionController(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller.Controller, error) {
 	client, err := controllerContext.NewClient("disruption-controller")
 	if err != nil {
 		return nil, err
@@ -65,5 +67,5 @@ func newDisruptionController(ctx context.Context, controllerContext ControllerCo
 		scaleClient,
 		client.Discovery(),
 	)
-	return newControllerLoop(dc.Run, controllerName), nil
+	return controller.newControllerLoop(dc.Run, controllerName), nil
 }

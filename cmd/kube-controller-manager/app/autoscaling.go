@@ -22,8 +22,10 @@ package app
 import (
 	"context"
 	"fmt"
+
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/scale"
+	"k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 	"k8s.io/kubernetes/pkg/controller/podautoscaler"
 	"k8s.io/kubernetes/pkg/controller/podautoscaler/metrics"
@@ -32,15 +34,15 @@ import (
 	"k8s.io/metrics/pkg/client/external_metrics"
 )
 
-func newHorizontalPodAutoscalerControllerDescriptor() *ControllerDescriptor {
-	return &ControllerDescriptor{
+func newHorizontalPodAutoscalerControllerDescriptor() *controller.ControllerDescriptor {
+	return &controller.ControllerDescriptor{
 		name:        names.HorizontalPodAutoscalerController,
 		aliases:     []string{"horizontalpodautoscaling"},
 		constructor: newHorizontalPodAutoscalerController,
 	}
 }
 
-func newHorizontalPodAutoscalerController(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
+func newHorizontalPodAutoscalerController(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller.Controller, error) {
 	clientConfig, err := controllerContext.NewClientConfig("horizontal-pod-autoscaler")
 	if err != nil {
 		return nil, err
@@ -92,7 +94,7 @@ func newHorizontalPodAutoscalerController(ctx context.Context, controllerContext
 		controllerContext.ComponentConfig.HPAController.HorizontalPodAutoscalerCPUInitializationPeriod.Duration,
 		controllerContext.ComponentConfig.HPAController.HorizontalPodAutoscalerInitialReadinessDelay.Duration,
 	)
-	return newControllerLoop(concurrentRun(
+	return controller.newControllerLoop(controller.concurrentRun(
 		func(ctx context.Context) {
 			custom_metrics.PeriodicallyInvalidate(
 				apiVersionsGetter,

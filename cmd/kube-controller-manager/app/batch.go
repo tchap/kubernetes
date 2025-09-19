@@ -23,20 +23,21 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 	"k8s.io/kubernetes/pkg/controller/cronjob"
 	"k8s.io/kubernetes/pkg/controller/job"
 )
 
-func newJobControllerDescriptor() *ControllerDescriptor {
-	return &ControllerDescriptor{
+func newJobControllerDescriptor() *controller.ControllerDescriptor {
+	return &controller.ControllerDescriptor{
 		name:        names.JobController,
 		aliases:     []string{"job"},
 		constructor: newJobController,
 	}
 }
 
-func newJobController(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
+func newJobController(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller.Controller, error) {
 	client, err := controllerContext.NewClient("job-controller")
 	if err != nil {
 		return nil, err
@@ -52,20 +53,20 @@ func newJobController(ctx context.Context, controllerContext ControllerContext, 
 		return nil, fmt.Errorf("creating Job controller: %w", err)
 	}
 
-	return newControllerLoop(func(ctx context.Context) {
+	return controller.newControllerLoop(func(ctx context.Context) {
 		jc.Run(ctx, int(controllerContext.ComponentConfig.JobController.ConcurrentJobSyncs))
 	}, controllerName), nil
 }
 
-func newCronJobControllerDescriptor() *ControllerDescriptor {
-	return &ControllerDescriptor{
+func newCronJobControllerDescriptor() *controller.ControllerDescriptor {
+	return &controller.ControllerDescriptor{
 		name:        names.CronJobController,
 		aliases:     []string{"cronjob"},
 		constructor: newCronJobController,
 	}
 }
 
-func newCronJobController(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
+func newCronJobController(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller.Controller, error) {
 	client, err := controllerContext.NewClient("cronjob-controller")
 	if err != nil {
 		return nil, err
@@ -81,7 +82,7 @@ func newCronJobController(ctx context.Context, controllerContext ControllerConte
 		return nil, fmt.Errorf("creating CronJob controller V2: %w", err)
 	}
 
-	return newControllerLoop(func(ctx context.Context) {
+	return controller.newControllerLoop(func(ctx context.Context) {
 		cj2c.Run(ctx, int(controllerContext.ComponentConfig.CronJobController.ConcurrentCronJobSyncs))
 	}, controllerName), nil
 }

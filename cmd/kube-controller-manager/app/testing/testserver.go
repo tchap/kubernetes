@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+	"k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -96,7 +97,7 @@ func StartTestServer(ctx context.Context, customFlags []string) (result TestServ
 	if err != nil {
 		return TestServer{}, err
 	}
-	all, disabled, aliases := app.KnownControllers(), app.ControllersDisabledByDefault(), app.ControllerAliases()
+	all, disabled, aliases := controller.KnownControllers(), controller.ControllersDisabledByDefault(), controller.ControllerAliases()
 	namedFlagSets := s.Flags(all, disabled, aliases)
 	for _, f := range namedFlagSets.FlagSets {
 		fs.AddFlagSet(f)

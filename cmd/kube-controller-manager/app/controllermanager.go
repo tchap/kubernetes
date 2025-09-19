@@ -77,6 +77,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/app/config"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/app/options"
+	controller2 "k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 	kubectrlmgrconfig "k8s.io/kubernetes/pkg/controller/apis/config"
 	garbagecollector "k8s.io/kubernetes/pkg/controller/garbagecollector"
@@ -134,7 +135,7 @@ controller, and serviceaccounts controller.`,
 			cliflag.PrintFlags(cmd.Flags())
 
 			ctx := context.Background()
-			c, err := s.Config(ctx, KnownControllers(), ControllersDisabledByDefault(), ControllerAliases())
+			c, err := s.Config(ctx, controller2.KnownControllers(), controller2.ControllersDisabledByDefault(), controller2.ControllerAliases())
 			if err != nil {
 				return err
 			}
@@ -157,7 +158,7 @@ controller, and serviceaccounts controller.`,
 	}
 
 	fs := cmd.Flags()
-	namedFlagSets := s.Flags(KnownControllers(), ControllersDisabledByDefault(), ControllerAliases())
+	namedFlagSets := s.Flags(controller2.KnownControllers(), controller2.ControllersDisabledByDefault(), controller2.ControllerAliases())
 	s.ParsedFlags = &namedFlagSets
 	verflag.AddFlags(namedFlagSets.FlagSet("global"))
 	globalflag.AddGlobalFlags(namedFlagSets.FlagSet("global"), cmd.Name(), logs.SkipLoggingConfigurationFlags())
@@ -244,7 +245,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 
 	saTokenControllerDescriptor := newServiceAccountTokenControllerDescriptor(rootClientBuilder)
 
-	run := func(ctx context.Context, controllerDescriptors map[string]*ControllerDescriptor) {
+	run := func(ctx context.Context, controllerDescriptors map[string]*controller2.ControllerDescriptor) {
 		controllerContext, err := CreateControllerContext(ctx, c, rootClientBuilder, clientBuilder)
 		if err != nil {
 			logger.Error(err, "Error building controller context")
@@ -276,7 +277,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 
 	// No leader election, run directly
 	if !c.ComponentConfig.Generic.LeaderElection.LeaderElect {
-		controllerDescriptors := NewControllerDescriptors()
+		controllerDescriptors := controller2.NewControllerDescriptors()
 		controllerDescriptors[names.ServiceAccountTokenController] = saTokenControllerDescriptor
 		run(ctx, controllerDescriptors)
 		return nil
@@ -304,7 +305,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 		saTokenControllerInit := saTokenControllerDescriptor.GetControllerConstructor()
 
 		// Wrap saTokenControllerDescriptor to signal readiness for migration after starting the controller.
-		saTokenControllerDescriptor.constructor = func(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error) {
+		saTokenControllerDescriptor.constructor = func(ctx context.Context, controllerContext ControllerContext, controllerName string) (controller2.Controller, error) {
 			ctrl, err := saTokenControllerInit(ctx, controllerContext, controllerName)
 			if err != nil {
 				return nil, err
@@ -313,7 +314,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 			// This wrapping is not exactly flawless as RunControllers uses type casting,
 			// which is now not possible for the wrapped controller.
 			// This fortunately doesn't matter for this particular controller.
-			return newControllerLoop(func(ctx context.Context) {
+			return controller2.newControllerLoop(func(ctx context.Context) {
 				close(leaderMigrator.MigrationReady)
 				ctrl.Run(ctx)
 			}, controllerName), nil
@@ -354,7 +355,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 		c.ComponentConfig.Generic.LeaderElection.ResourceName,
 		leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				controllerDescriptors := NewControllerDescriptors()
+				controllerDescriptors := controller2.NewControllerDescriptors()
 				if leaderMigrator != nil {
 					// If leader migration is enabled, we should start only non-migrated controllers
 					//  for the main lock.
@@ -385,7 +386,7 @@ func Run(ctx context.Context, c *config.CompletedConfig) error {
 			leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(ctx context.Context) {
 					logger.Info("leader migration: starting migrated controllers.")
-					controllerDescriptors := NewControllerDescriptors()
+					controllerDescriptors := controller2.NewControllerDescriptors()
 					controllerDescriptors = filteredControllerDescriptors(controllerDescriptors, leaderMigrator.FilterFunc, leadermigration.ControllerMigrated)
 					// DO NOT start saTokenController under migration lock
 					delete(controllerDescriptors, names.ServiceAccountTokenController)
@@ -441,7 +442,7 @@ type ControllerContext struct {
 }
 
 // IsControllerEnabled checks if the context's controllers enabled or not
-func (c ControllerContext) IsControllerEnabled(controllerDescriptor *ControllerDescriptor) bool {
+func (c ControllerContext) IsControllerEnabled(controllerDescriptor *controller2.ControllerDescriptor) bool {
 	controllersDisabledByDefault := sets.NewString()
 	if controllerDescriptor.IsDisabledByDefault() {
 		controllersDisabledByDefault.Insert(controllerDescriptor.Name())
@@ -530,7 +531,7 @@ func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, roo
 	}
 
 	if controllerContext.ComponentConfig.GarbageCollectorController.EnableGarbageCollector &&
-		controllerContext.IsControllerEnabled(NewControllerDescriptors()[names.GarbageCollectorController]) {
+		controllerContext.IsControllerEnabled(controller2.NewControllerDescriptors()[names.GarbageCollectorController]) {
 		ignoredResources := make(map[schema.GroupResource]struct{})
 		for _, r := range controllerContext.ComponentConfig.GarbageCollectorController.GCIgnoredResources {
 			ignoredResources[schema.GroupResource{Group: r.Group, Resource: r.Resource}] = struct{}{}
@@ -561,14 +562,14 @@ type HealthCheckAdder interface {
 // A health check is registered for each controller using the controller name. The default check always passes.
 // If the controller implements controller.HealthCheckable, though, the given check is used.
 // The controller can also implement controller.Debuggable, in which case the debug handler is registered with the given mux.
-func BuildControllers(ctx context.Context, controllerCtx ControllerContext, controllerDescriptors map[string]*ControllerDescriptor,
-	unsecuredMux *mux.PathRecorderMux, healthzHandler HealthCheckAdder) ([]Controller, error) {
+func BuildControllers(ctx context.Context, controllerCtx ControllerContext, controllerDescriptors map[string]*controller2.ControllerDescriptor,
+	unsecuredMux *mux.PathRecorderMux, healthzHandler HealthCheckAdder) ([]controller2.Controller, error) {
 	logger := klog.FromContext(ctx)
 	var (
-		controllers []Controller
+		controllers []controller2.Controller
 		checks      []healthz.HealthChecker
 	)
-	buildController := func(controllerDesc *ControllerDescriptor) error {
+	buildController := func(controllerDesc *controller2.ControllerDescriptor) error {
 		controllerName := controllerDesc.Name()
 		ctrl, err := controllerDesc.BuildController(ctx, controllerCtx)
 		if err != nil {
@@ -645,7 +646,7 @@ func BuildControllers(ctx context.Context, controllerCtx ControllerContext, cont
 // Once the context is cancelled, RunControllers waits for shutdownTimeout for all controllers to terminate.
 // When the timeout is reached, the function unblocks and returns false.
 // Zero shutdown timeout means that there is no timeout.
-func RunControllers(ctx context.Context, controllerCtx ControllerContext, controllers []Controller,
+func RunControllers(ctx context.Context, controllerCtx ControllerContext, controllers []controller2.Controller,
 	controllerStartJitterMaxFactor float64, shutdownTimeout time.Duration) bool {
 	logger := klog.FromContext(ctx)
 
@@ -806,8 +807,8 @@ func leaderElectAndRun(ctx context.Context, c *config.CompletedConfig, lockIdent
 }
 
 // filteredControllerDescriptors returns all controllerDescriptors after filtering through filterFunc.
-func filteredControllerDescriptors(controllerDescriptors map[string]*ControllerDescriptor, filterFunc leadermigration.FilterFunc, expected leadermigration.FilterResult) map[string]*ControllerDescriptor {
-	resultControllers := make(map[string]*ControllerDescriptor)
+func filteredControllerDescriptors(controllerDescriptors map[string]*controller2.ControllerDescriptor, filterFunc leadermigration.FilterFunc, expected leadermigration.FilterResult) map[string]*controller2.ControllerDescriptor {
+	resultControllers := make(map[string]*controller2.ControllerDescriptor)
 	for name, controllerDesc := range controllerDescriptors {
 		if filterFunc(name) == expected {
 			resultControllers[name] = controllerDesc

@@ -29,6 +29,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/kubernetes/cmd/kube-controller-manager/internal/controller"
 
 	"k8s.io/kubernetes/cmd/kube-controller-manager/names"
 )
@@ -110,7 +111,7 @@ func possibleDiscoveryResource() []*metav1.APIResourceList {
 }
 
 func TestController_DiscoveryError(t *testing.T) {
-	controllerDescriptorMap := map[string]*ControllerDescriptor{
+	controllerDescriptorMap := map[string]*controller.ControllerDescriptor{
 		"ResourceQuotaController":          newResourceQuotaControllerDescriptor(),
 		"GarbageCollectorController":       newGarbageCollectorControllerDescriptor(),
 		"EndpointSliceController":          newEndpointSliceControllerDescriptor(),

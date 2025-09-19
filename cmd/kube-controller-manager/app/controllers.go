@@ -17,100 +17,11 @@ limitations under the License.
 package app
 
 import (
-	"context"
 	"fmt"
 	"sort"
 
 	"k8s.io/apimachinery/pkg/util/sets"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	"k8s.io/component-base/featuregate"
-	"k8s.io/klog/v2"
 )
-
-// This file contains types and functions for wrapping controller implementations from downstream packages.
-// Every controller wrapper implements the Controller interface,
-// which is then associated with a ControllerDescriptor, which holds additional static metadata
-// needed so that the manager can manage Controllers properly.
-
-// Controller defines the base interface that all controller wrappers must implement.
-type Controller interface {
-	// Name returns the controller's canonical name.
-	Name() string
-
-	// Run runs the controller loop.
-	// When there is anything to be done, it blocks until the context is cancelled.
-	// Run must ensure all goroutines are terminated before returning.
-	Run(context.Context)
-}
-
-// ControllerConstructor is a constructor for a controller.
-// A nil Controller returned means that the associated controller is disabled.
-type ControllerConstructor func(ctx context.Context, controllerContext ControllerContext, controllerName string) (Controller, error)
-
-type ControllerDescriptor struct {
-	name                      string
-	constructor               ControllerConstructor
-	requiredFeatureGates      []featuregate.Feature
-	aliases                   []string
-	isDisabledByDefault       bool
-	isCloudProviderController bool
-	requiresSpecialHandling   bool
-}
-
-func (r *ControllerDescriptor) Name() string {
-	return r.name
-}
-
-func (r *ControllerDescriptor) GetControllerConstructor() ControllerConstructor {
-	return r.constructor
-}
-
-func (r *ControllerDescriptor) GetRequiredFeatureGates() []featuregate.Feature {
-	return append([]featuregate.Feature(nil), r.requiredFeatureGates...)
-}
-
-// GetAliases returns aliases to ensure backwards compatibility and should never be removed!
-// Only addition of new aliases is allowed, and only when a canonical name is changed (please see CHANGE POLICY of controller names)
-func (r *ControllerDescriptor) GetAliases() []string {
-	return append([]string(nil), r.aliases...)
-}
-
-func (r *ControllerDescriptor) IsDisabledByDefault() bool {
-	return r.isDisabledByDefault
-}
-
-func (r *ControllerDescriptor) IsCloudProviderController() bool {
-	return r.isCloudProviderController
-}
-
-// RequiresSpecialHandling should return true only in a special non-generic controllers like ServiceAccountTokenController
-func (r *ControllerDescriptor) RequiresSpecialHandling() bool {
-	return r.requiresSpecialHandling
-}
-
-// BuildController creates a controller based on the given descriptor.
-// The associated controller's constructor is called at the end, so the same contract applies for the return values here.
-func (r *ControllerDescriptor) BuildController(ctx context.Context, controllerCtx ControllerContext) (Controller, error) {
-	logger := klog.FromContext(ctx)
-	controllerName := r.Name()
-
-	for _, featureGate := range r.GetRequiredFeatureGates() {
-		if !utilfeature.DefaultFeatureGate.Enabled(featureGate) {
-			logger.Info("Controller is disabled by a feature gate",
-				"controller", controllerName,
-				"requiredFeatureGates", r.GetRequiredFeatureGates())
-			return nil, nil
-		}
-	}
-
-	if r.IsCloudProviderController() {
-		logger.Info("Skipping a cloud provider controller", "controller", controllerName)
-		return nil, nil
-	}
-
-	ctx = klog.NewContext(ctx, klog.LoggerWithName(logger, controllerName))
-	return r.GetControllerConstructor()(ctx, controllerCtx, controllerName)
-}
 
 // KnownControllers returns all known controllers' name
 func KnownControllers() []string {
@@ -177,7 +88,7 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 
 	// First add "special" controllers that aren't initialized normally. These controllers cannot be initialized
 	// in the main controller loop initialization, so we add them here only for the metadata and duplication detection.
-	// app.ControllerDescriptor#RequiresSpecialHandling should return true for such controllers
+	// ControllerDescriptor#RequiresSpecialHandling should return true for such controllers
 	// The only known special case is the ServiceAccountTokenController which *must* be started
 	// first to ensure that the SA tokens for future controllers will exist. Think very carefully before adding new
 	// special controllers.
