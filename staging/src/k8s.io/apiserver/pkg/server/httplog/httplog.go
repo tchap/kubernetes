@@ -74,7 +74,8 @@ type respLogger struct {
 	userAgent string
 	w         http.ResponseWriter
 
-	logStacktracePred StacktracePred
+	logStacktracePred    StacktracePred
+	shouldLogRequestPred func(ctx context.Context) bool
 }
 
 var _ http.ResponseWriter = &respLogger{}
@@ -127,7 +128,7 @@ func withLogging(handler http.Handler, stackTracePred StacktracePred, shouldLogR
 			startTime = receivedTimestamp
 		}
 
-		rl := newLoggedWithStartTime(req, w, startTime).StacktraceWhen(stackTracePred)
+		rl := newLoggedWithStartTime(req, w, startTime).StacktraceWhen(stackTracePred).ShouldLogRequest(shouldLogRequest)
 		req = req.WithContext(context.WithValue(ctx, respLoggerContextKey, rl))
 
 		var logFunc func()
@@ -207,6 +208,12 @@ func (rl *respLogger) StacktraceWhen(pred StacktracePred) *respLogger {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
 	rl.logStacktracePred = pred
+	return rl
+}
+
+// ShouldLogRequest can be used to set a custom logging condition for Log.
+func (rl *respLogger) ShouldLogRequest(shouldLogRequestPred func(context.Context) bool) *respLogger {
+	rl.shouldLogRequestPred = shouldLogRequestPred
 	return rl
 }
 
@@ -297,7 +304,14 @@ func (rl *respLogger) Log(ctx context.Context) {
 		}
 	}
 
-	klog.FromContext(ctx).WithCallDepth(1).Info("HTTP", keysAndValues...)
+	logger := klog.FromContext(ctx)
+	shouldLogRequest := logger.V(withLoggingLevel).Enabled()
+	if rl.shouldLogRequestPred != nil {
+		shouldLogRequest = rl.shouldLogRequestPred(ctx)
+	}
+	if shouldLogRequest {
+		logger.WithCallDepth(1).Info("HTTP", keysAndValues...)
+	}
 }
 
 // Header implements http.ResponseWriter.
