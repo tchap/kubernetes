@@ -131,11 +131,13 @@ func (ttlc *Controller) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, ttlc.worker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, ttlc.worker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 func (ttlc *Controller) addNode(logger klog.Logger, obj interface{}) {
