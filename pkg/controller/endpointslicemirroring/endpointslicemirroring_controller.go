@@ -19,6 +19,7 @@ package endpointslicemirroring
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -232,11 +233,17 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 	}
 
 	logger.V(2).Info("Starting worker threads", "total", workers)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		c.queue.ShutDown()
+	})
 	for i := 0; i < workers; i++ {
-		go wait.Until(func() { c.worker(logger) }, c.workerLoopPeriod, ctx.Done())
+		wg.Go(func() {
+			wait.Until(func() { c.worker(logger) }, c.workerLoopPeriod, ctx.Done())
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 // worker runs a worker thread that just dequeues items, processes them, and
