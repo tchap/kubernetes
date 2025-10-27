@@ -19,6 +19,7 @@ package storageversiongc
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	apiserverinternalv1alpha1 "k8s.io/api/apiserverinternal/v1alpha1"
@@ -110,10 +111,14 @@ func (c *Controller) Run(ctx context.Context) {
 	// runLeaseWorker handles legit identity lease deletion, while runStorageVersionWorker
 	// handles storageversion creation/update with non-existing id. The latter should rarely
 	// happen. It's okay for the two workers to conflict on update.
-	go wait.UntilWithContext(ctx, c.runLeaseWorker, time.Second)
-	go wait.UntilWithContext(ctx, c.runStorageVersionWorker, time.Second)
-
-	<-ctx.Done()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		wait.UntilWithContext(ctx, c.runLeaseWorker, time.Second)
+	})
+	wg.Go(func() {
+		wait.UntilWithContext(ctx, c.runStorageVersionWorker, time.Second)
+	})
+	wg.Wait()
 }
 
 func (c *Controller) runLeaseWorker(ctx context.Context) {
