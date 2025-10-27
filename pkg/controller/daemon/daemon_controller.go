@@ -303,8 +303,13 @@ func (dsc *DaemonSetsController) Run(ctx context.Context, workers int) {
 	dsc.eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: dsc.kubeClient.CoreV1().Events("")})
 	defer dsc.eventBroadcaster.Shutdown()
 
-	defer dsc.queue.ShutDown()
-	defer dsc.nodeUpdateQueue.ShutDown()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		dsc.queue.ShutDown()
+		dsc.nodeUpdateQueue.ShutDown()
+	})
+	defer wg.Wait()
 
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting daemon sets controller")
@@ -315,13 +320,16 @@ func (dsc *DaemonSetsController) Run(ctx context.Context, workers int) {
 	}
 
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, dsc.runWorker, time.Second)
-		go wait.UntilWithContext(ctx, dsc.runNodeUpdateWorker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, dsc.runWorker, time.Second)
+		})
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, dsc.runNodeUpdateWorker, time.Second)
+		})
 	}
-
-	go wait.Until(dsc.failedPodsBackoff.GC, BackoffGCInterval, ctx.Done())
-
-	<-ctx.Done()
+	wg.Go(func() {
+		wait.Until(dsc.failedPodsBackoff.GC, BackoffGCInterval, ctx.Done())
+	})
 }
 
 func (dsc *DaemonSetsController) runWorker(ctx context.Context) {
