@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	apps "k8s.io/api/apps/v1"
@@ -181,11 +182,13 @@ func (ssc *StatefulSetController) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, ssc.worker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, ssc.worker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 // addPod adds the statefulset for the pod to the sync queue
