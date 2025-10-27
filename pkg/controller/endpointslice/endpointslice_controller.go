@@ -19,6 +19,7 @@ package endpointslice
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -278,9 +279,14 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 	c.eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: c.client.CoreV1().Events("")})
 	defer c.eventBroadcaster.Shutdown()
 
-	defer c.serviceQueue.ShutDown()
-	defer c.podQueue.ShutDown()
-	defer c.topologyQueue.ShutDown()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		c.serviceQueue.ShutDown()
+		c.podQueue.ShutDown()
+		c.topologyQueue.ShutDown()
+	})
+	defer wg.Wait()
 
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting endpoint slice controller")
@@ -292,13 +298,18 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 
 	logger.V(2).Info("Starting service queue worker threads", "total", workers)
 	for i := 0; i < workers; i++ {
-		go wait.Until(func() { c.serviceQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
-		go wait.Until(func() { c.podQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
+		wg.Go(func() {
+			wait.Until(func() { c.serviceQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
+		})
+		wg.Go(func() {
+			wait.Until(func() { c.podQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
+		})
 	}
-	logger.V(2).Info("Starting topology queue worker threads", "total", 1)
-	go wait.Until(func() { c.topologyQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
 
-	<-ctx.Done()
+	logger.V(2).Info("Starting topology queue worker threads", "total", 1)
+	wg.Go(func() {
+		wait.Until(func() { c.topologyQueueWorker(logger) }, c.workerLoopPeriod, ctx.Done())
+	})
 }
 
 // serviceQueueWorker runs a worker thread that just dequeues items, processes
