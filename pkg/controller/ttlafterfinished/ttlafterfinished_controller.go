@@ -19,6 +19,7 @@ package ttlafterfinished
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	batch "k8s.io/api/batch/v1"
@@ -116,11 +117,13 @@ func (tc *Controller) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, tc.worker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, tc.worker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 func (tc *Controller) addJob(logger klog.Logger, obj interface{}) {
