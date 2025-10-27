@@ -209,11 +209,18 @@ func (a *HorizontalController) Run(ctx context.Context, workers int) {
 		return
 	}
 
-	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, a.worker, time.Second)
-	}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		a.queue.ShutDown()
+	})
 
-	<-ctx.Done()
+	for i := 0; i < workers; i++ {
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, a.worker, time.Second)
+		})
+	}
+	wg.Wait()
 }
 
 // obj could be an *v1.HorizontalPodAutoscaler, or a DeletionFinalStateUnknown marker item.
