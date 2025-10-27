@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -146,11 +147,13 @@ func (svmc *SVMController) Run(ctx context.Context) {
 		return
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, svmc.worker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, svmc.worker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 func (svmc *SVMController) worker(ctx context.Context) {
