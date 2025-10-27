@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -186,11 +187,13 @@ func (r *rangeAllocator) Run(ctx context.Context) {
 		return
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < cidrUpdateWorkers; i++ {
-		go wait.UntilWithContext(ctx, r.runWorker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, r.runWorker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 // runWorker is a long-running function that will continually call the
