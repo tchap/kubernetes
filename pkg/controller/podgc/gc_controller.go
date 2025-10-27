@@ -104,9 +104,7 @@ func (gcc *PodGCController) Run(ctx context.Context) {
 		return
 	}
 
-	go wait.UntilWithContext(ctx, gcc.gc, gcc.gcCheckPeriod)
-
-	<-ctx.Done()
+	wait.UntilWithContext(ctx, gcc.gc, gcc.gcCheckPeriod)
 }
 
 func (gcc *PodGCController) gc(ctx context.Context) {
