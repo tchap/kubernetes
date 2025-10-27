@@ -247,11 +247,17 @@ func (rsc *ReplicaSetController) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		rsc.queue.ShutDown()
+	})
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, rsc.worker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, rsc.worker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 // getReplicaSetsWithSameController returns a list of ReplicaSets with the same
