@@ -19,6 +19,7 @@ package validatingadmissionpolicystatus
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"k8s.io/api/admissionregistration/v1"
@@ -59,11 +60,14 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 	}
 
 	defer c.policyQueue.ShutDown()
-	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
-	}
 
-	<-ctx.Done()
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		})
+	}
+	wg.Wait()
 }
 
 func NewController(policyInformer informerv1.ValidatingAdmissionPolicyInformer, policyClient admissionregistrationv1.ValidatingAdmissionPolicyInterface, typeChecker *validatingadmissionpolicy.TypeChecker) (*Controller, error) {
