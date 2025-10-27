@@ -19,6 +19,7 @@ package bootstrap
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -121,9 +122,15 @@ func (tc *TokenCleaner) Run(ctx context.Context) {
 		return
 	}
 
-	go wait.UntilWithContext(ctx, tc.worker, 10*time.Second)
-
-	<-ctx.Done()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		tc.queue.ShutDown()
+	})
+	wg.Go(func() {
+		wait.UntilWithContext(ctx, tc.worker, 10*time.Second)
+	})
+	wg.Wait()
 }
 
 func (tc *TokenCleaner) enqueueSecrets(obj interface{}) {
