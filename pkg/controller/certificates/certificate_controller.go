@@ -21,6 +21,7 @@ package certificates
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -124,11 +125,17 @@ func (cc *CertificateController) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		defer cc.queue.ShutDown()
+	})
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, cc.worker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, cc.worker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 // worker runs a thread that dequeues CSRs, handles them, and marks them done.

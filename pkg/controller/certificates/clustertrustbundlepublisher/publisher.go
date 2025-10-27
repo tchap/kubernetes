@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	certificatesv1alpha1 "k8s.io/api/certificates/v1alpha1"
@@ -272,23 +273,30 @@ func (p *ClusterTrustBundlePublisher[T]) caContentChangedListener() dynamiccerti
 
 func (p *ClusterTrustBundlePublisher[T]) Run(ctx context.Context) {
 	defer utilruntime.HandleCrash()
-	defer p.queue.ShutDown()
 
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting ClusterTrustBundle CA cert publisher controller")
 	defer logger.Info("Shutting down ClusterTrustBundle CA cert publisher controller")
 
-	go p.ctbInformer.Run(ctx.Done())
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		p.ctbInformer.Run(ctx.Done())
+	})
+	wg.Go(func() {
+		<-ctx.Done()
+		p.queue.ShutDown()
+	})
+	defer wg.Wait()
 
+	// This can only return false when the context is canceled, so it's safe to defer wg.Wait. It won't hang.
 	if !cache.WaitForNamedCacheSyncWithContext(ctx, p.ctbListerSynced) {
 		return
 	}
 
-	// init the signer syncer
 	p.queue.Add("")
-	go wait.UntilWithContext(ctx, p.runWorker(), time.Second)
-
-	<-ctx.Done()
+	wg.Go(func() {
+		wait.UntilWithContext(ctx, p.runWorker(), time.Second)
+	})
 }
 
 func (p *ClusterTrustBundlePublisher[T]) runWorker() func(context.Context) {

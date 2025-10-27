@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -111,11 +112,17 @@ func (c *Publisher) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		c.queue.ShutDown()
+	})
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, c.runWorker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 func (c *Publisher) configMapDeleted(obj interface{}) {
