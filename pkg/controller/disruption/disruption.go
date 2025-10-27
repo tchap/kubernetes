@@ -19,6 +19,7 @@ package disruption
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	apps "k8s.io/api/apps/v1beta1"
@@ -461,9 +462,14 @@ func (dc *DisruptionController) Run(ctx context.Context) {
 	}
 	defer dc.broadcaster.Shutdown()
 
-	defer dc.queue.ShutDown()
-	defer dc.recheckQueue.ShutDown()
-	defer dc.stalePodDisruptionQueue.ShutDown()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		dc.queue.ShutDown()
+		dc.recheckQueue.ShutDown()
+		dc.stalePodDisruptionQueue.ShutDown()
+	})
+	defer wg.Wait()
 
 	logger.Info("Starting disruption controller")
 	defer logger.Info("Shutting down disruption controller")
@@ -472,11 +478,15 @@ func (dc *DisruptionController) Run(ctx context.Context) {
 		return
 	}
 
-	go wait.UntilWithContext(ctx, dc.worker, time.Second)
-	go wait.Until(dc.recheckWorker, time.Second, ctx.Done())
-	go wait.UntilWithContext(ctx, dc.stalePodDisruptionWorker, time.Second)
-
-	<-ctx.Done()
+	wg.Go(func() {
+		wait.UntilWithContext(ctx, dc.worker, time.Second)
+	})
+	wg.Go(func() {
+		wait.Until(dc.recheckWorker, time.Second, ctx.Done())
+	})
+	wg.Go(func() {
+		wait.UntilWithContext(ctx, dc.stalePodDisruptionWorker, time.Second)
+	})
 }
 
 func (dc *DisruptionController) addDB(logger klog.Logger, obj interface{}) {
