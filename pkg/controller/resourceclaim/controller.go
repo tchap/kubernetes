@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -427,11 +428,13 @@ func (ec *Controller) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, ec.runWorker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, ec.runWorker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 func (ec *Controller) runWorker(ctx context.Context) {
