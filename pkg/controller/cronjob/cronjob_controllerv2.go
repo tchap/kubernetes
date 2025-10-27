@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -148,11 +149,17 @@ func (jm *ControllerV2) Run(ctx context.Context, workers int) {
 		return
 	}
 
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		jm.queue.ShutDown()
+	})
 	for i := 0; i < workers; i++ {
-		go wait.UntilWithContext(ctx, jm.worker, time.Second)
+		wg.Go(func() {
+			wait.UntilWithContext(ctx, jm.worker, time.Second)
+		})
 	}
-
-	<-ctx.Done()
+	wg.Wait()
 }
 
 func (jm *ControllerV2) worker(ctx context.Context) {
