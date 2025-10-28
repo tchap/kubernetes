@@ -123,6 +123,7 @@ var (
 func (ttlc *Controller) Run(ctx context.Context, workers int) {
 	defer utilruntime.HandleCrash()
 	defer ttlc.queue.ShutDown()
+
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting TTL controller")
 	defer logger.Info("Shutting down TTL controller")
@@ -132,6 +133,10 @@ func (ttlc *Controller) Run(ctx context.Context, workers int) {
 	}
 
 	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		ttlc.queue.ShutDown()
+	})
 	for i := 0; i < workers; i++ {
 		wg.Go(func() {
 			wait.UntilWithContext(ctx, ttlc.worker, time.Second)
