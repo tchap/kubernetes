@@ -95,9 +95,15 @@ func NewStorageVersionGC(ctx context.Context, clientset kubernetes.Interface, le
 func (c *Controller) Run(ctx context.Context) {
 	logger := klog.FromContext(ctx)
 	defer utilruntime.HandleCrash()
-	defer c.leaseQueue.ShutDown()
-	defer c.storageVersionQueue.ShutDown()
 	defer logger.Info("Shutting down storage version garbage collector")
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		c.leaseQueue.ShutDown()
+		c.storageVersionQueue.ShutDown()
+	})
+	defer wg.Wait()
 
 	logger.Info("Starting storage version garbage collector")
 
@@ -111,14 +117,12 @@ func (c *Controller) Run(ctx context.Context) {
 	// runLeaseWorker handles legit identity lease deletion, while runStorageVersionWorker
 	// handles storageversion creation/update with non-existing id. The latter should rarely
 	// happen. It's okay for the two workers to conflict on update.
-	var wg sync.WaitGroup
 	wg.Go(func() {
 		wait.UntilWithContext(ctx, c.runLeaseWorker, time.Second)
 	})
 	wg.Go(func() {
 		wait.UntilWithContext(ctx, c.runStorageVersionWorker, time.Second)
 	})
-	wg.Wait()
 }
 
 func (c *Controller) runLeaseWorker(ctx context.Context) {
