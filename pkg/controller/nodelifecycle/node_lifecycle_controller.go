@@ -458,8 +458,13 @@ func (nc *Controller) Run(ctx context.Context) {
 	defer nc.broadcaster.Shutdown()
 
 	// Close node update queue to cleanup go routine.
-	defer nc.nodeUpdateQueue.ShutDown()
-	defer nc.podUpdateQueue.ShutDown()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		nc.nodeUpdateQueue.ShutDown()
+		nc.podUpdateQueue.ShutDown()
+	})
+	defer wg.Wait()
 
 	logger.Info("Starting node controller")
 	defer logger.Info("Shutting down node controller")
@@ -468,7 +473,6 @@ func (nc *Controller) Run(ctx context.Context) {
 		return
 	}
 
-	var wg sync.WaitGroup
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SeparateTaintEvictionController) {
 		logger.Info("Starting", "controller", taintEvictionController)
 		wg.Go(func() {
@@ -507,7 +511,6 @@ func (nc *Controller) Run(ctx context.Context) {
 			}
 		}, nc.nodeMonitorPeriod)
 	})
-	wg.Wait()
 }
 
 func (nc *Controller) doNodeProcessingPassWorker(ctx context.Context) {
