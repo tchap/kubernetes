@@ -188,6 +188,10 @@ func (r *rangeAllocator) Run(ctx context.Context) {
 	}
 
 	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		r.queue.ShutDown()
+	})
 	for i := 0; i < cidrUpdateWorkers; i++ {
 		wg.Go(func() {
 			wait.UntilWithContext(ctx, r.runWorker, time.Second)
