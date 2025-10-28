@@ -104,7 +104,15 @@ func (gcc *PodGCController) Run(ctx context.Context) {
 		return
 	}
 
-	wait.UntilWithContext(ctx, gcc.gc, gcc.gcCheckPeriod)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		gcc.nodeQueue.ShutDown()
+	})
+	wg.Go(func() {
+		wait.UntilWithContext(ctx, gcc.gc, gcc.gcCheckPeriod)
+	})
+	wg.Wait()
 }
 
 func (gcc *PodGCController) gc(ctx context.Context) {
