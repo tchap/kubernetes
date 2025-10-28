@@ -214,7 +214,6 @@ func (a *HorizontalController) Run(ctx context.Context, workers int) {
 		<-ctx.Done()
 		a.queue.ShutDown()
 	})
-
 	for i := 0; i < workers; i++ {
 		wg.Go(func() {
 			wait.UntilWithContext(ctx, a.worker, time.Second)
