@@ -134,7 +134,6 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 	defer c.eventBroadcaster.Shutdown()
 
 	logger := klog.FromContext(ctx)
-
 	logger.Info("Starting", "controller", controllerName)
 	defer logger.Info("Shutting down", "controller", controllerName)
 
@@ -143,6 +142,10 @@ func (c *Controller) Run(ctx context.Context, workers int) {
 	}
 
 	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		c.queue.ShutDown()
+	})
 	for i := 0; i < workers; i++ {
 		wg.Go(func() {
 			wait.UntilWithContext(ctx, c.worker, c.workerLoopPeriod)
