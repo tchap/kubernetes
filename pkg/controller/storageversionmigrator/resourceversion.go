@@ -19,6 +19,7 @@ package storageversionmigrator
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -133,7 +134,15 @@ func (rv *ResourceVersionController) Run(ctx context.Context) {
 		return
 	}
 
-	wait.UntilWithContext(ctx, rv.worker, time.Second)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		rv.queue.ShutDown()
+	})
+	wg.Go(func() {
+		wait.UntilWithContext(ctx, rv.worker, time.Second)
+	})
+	wg.Wait()
 }
 
 func (rv *ResourceVersionController) worker(ctx context.Context) {
