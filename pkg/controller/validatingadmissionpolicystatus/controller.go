@@ -55,19 +55,22 @@ type Controller struct {
 func (c *Controller) Run(ctx context.Context, workers int) {
 	defer utilruntime.HandleCrash()
 
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		c.policyQueue.ShutDown()
+	})
+	defer wg.Wait()
+
 	if !cache.WaitForNamedCacheSyncWithContext(ctx, c.policySynced) {
 		return
 	}
 
-	defer c.policyQueue.ShutDown()
-
-	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Go(func() {
 			wait.UntilWithContext(ctx, c.runWorker, time.Second)
 		})
 	}
-	wg.Wait()
 }
 
 func NewController(policyInformer informerv1.ValidatingAdmissionPolicyInformer, policyClient admissionregistrationv1.ValidatingAdmissionPolicyInterface, typeChecker *validatingadmissionpolicy.TypeChecker) (*Controller, error) {
