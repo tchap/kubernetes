@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2/ktesting"
 	"k8s.io/kubernetes/pkg/controller/testutil"
 )
 
@@ -192,7 +193,8 @@ func TestCreatePod(t *testing.T) {
 
 	for _, item := range testCases {
 		t.Run(item.description, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			_, ctx := ktesting.NewTestContext(t)
+			ctx, cancel := context.WithCancel(ctx)
 			fakeClientset := fake.NewSimpleClientset(&corev1.PodList{Items: []corev1.Pod{*item.pod}})
 			controller, podIndexer, _ := setupNewController(ctx, fakeClientset)
 			controller.recorder = testutil.NewFakeRecorder()

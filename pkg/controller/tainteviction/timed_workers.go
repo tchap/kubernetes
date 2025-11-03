@@ -27,6 +27,8 @@ import (
 )
 
 // WorkArgs keeps arguments that will be passed to the function executed by the worker.
+//
+// Deprecated: Use timedworkers package.
 type WorkArgs struct {
 	// Object is the work item. The UID is only set if it was set when adding the work item.
 	Object NamespacedObject
@@ -42,6 +44,8 @@ func (w *WorkArgs) KeyFromWorkArgs() string {
 }
 
 // NewWorkArgs is a helper function to create new `WorkArgs` without a UID.
+//
+// Deprecated: Use timedworkers package.
 func NewWorkArgs(name, namespace string) *WorkArgs {
 	return &WorkArgs{
 		Object: NamespacedObject{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}},
@@ -49,6 +53,8 @@ func NewWorkArgs(name, namespace string) *WorkArgs {
 }
 
 // TimedWorker is a responsible for executing a function no earlier than at FireAt time.
+//
+// Deprecated: Use timedworkers package.
 type TimedWorker struct {
 	WorkItem  *WorkArgs
 	CreatedAt time.Time
@@ -88,6 +94,8 @@ func (w *TimedWorker) Cancel() {
 }
 
 // TimedWorkerQueue keeps a set of TimedWorkers that are still wait for execution.
+//
+// Deprecated: Use timedworkers package.
 type TimedWorkerQueue struct {
 	sync.Mutex
 	// map of workers keyed by string returned by 'KeyFromWorkArgs' from the given worker.
@@ -97,8 +105,9 @@ type TimedWorkerQueue struct {
 	clock    clock.WithDelayedExecution
 }
 
-// CreateWorkerQueue creates a new TimedWorkerQueue for workers that will execute
-// given function `f`.
+// CreateWorkerQueue creates a new TimedWorkerQueue for workers that will execute given function `f`.
+//
+// Deprecated: Use timedworkers package.
 func CreateWorkerQueue(f func(ctx context.Context, fireAt time.Time, args *WorkArgs) error) *TimedWorkerQueue {
 	return &TimedWorkerQueue{
 		workers:  make(map[string]*TimedWorker),

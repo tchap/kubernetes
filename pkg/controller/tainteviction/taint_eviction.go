@@ -43,6 +43,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/core/helper"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/controller/tainteviction/metrics"
+	"k8s.io/kubernetes/pkg/controller/tainteviction/timedworkers"
 	controllerutil "k8s.io/kubernetes/pkg/controller/util/node"
 	utilpod "k8s.io/kubernetes/pkg/util/pod"
 )
@@ -92,7 +93,7 @@ type Controller struct {
 	nodeListerSynced      cache.InformerSynced
 	getPodsAssignedToNode GetPodsByNodeNameFunc
 
-	taintEvictionQueue *TimedWorkerQueue
+	taintEvictionQueue *timedworkers.TimedWorkerQueue[types.NamespacedName]
 	// keeps a map from nodeName to all noExecute taints on that Node
 	taintedNodesLock sync.Mutex
 	taintedNodes     map[string][]v1.Taint
@@ -104,13 +105,13 @@ type Controller struct {
 	podUpdateQueue  workqueue.TypedInterface[podUpdateItem]
 }
 
-func deletePodHandler(c clientset.Interface, emitEventFunc func(types.NamespacedName), controllerName string) func(ctx context.Context, fireAt time.Time, args *WorkArgs) error {
-	return func(ctx context.Context, fireAt time.Time, args *WorkArgs) error {
-		ns := args.Object.Namespace
-		name := args.Object.Name
-		klog.FromContext(ctx).Info("Deleting pod", "controller", controllerName, "pod", args.Object)
+func deletePodHandler(c clientset.Interface, emitEventFunc func(types.NamespacedName), controllerName string) func(ctx context.Context, fireAt time.Time, args types.NamespacedName) error {
+	return func(ctx context.Context, fireAt time.Time, args types.NamespacedName) error {
+		ns := args.Namespace
+		name := args.Name
+		klog.FromContext(ctx).Info("Deleting pod", "controller", controllerName, "pod", args)
 		if emitEventFunc != nil {
-			emitEventFunc(args.Object.NamespacedName)
+			emitEventFunc(args)
 		}
 		var err error
 		for i := 0; i < retries; i++ {
@@ -220,7 +221,7 @@ func New(ctx context.Context, c clientset.Interface, podInformer corev1informers
 		nodeUpdateQueue: workqueue.NewTypedWithConfig(workqueue.TypedQueueConfig[nodeUpdateItem]{Name: "noexec_taint_node"}),
 		podUpdateQueue:  workqueue.NewTypedWithConfig(workqueue.TypedQueueConfig[podUpdateItem]{Name: "noexec_taint_pod"}),
 	}
-	tm.taintEvictionQueue = CreateWorkerQueue(deletePodHandler(c, tm.emitPodDeletionEvent, tm.name))
+	tm.taintEvictionQueue = timedworkers.CreateWorkerQueue(deletePodHandler(c, tm.emitPodDeletionEvent, tm.name))
 
 	_, err := podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -346,6 +347,10 @@ func (tc *Controller) Run(ctx context.Context) {
 	}(ctx.Done())
 
 	wg := sync.WaitGroup{}
+	wg.Go(func() {
+		tc.taintEvictionQueue.Run(ctx, UpdateWorkerSize)
+	})
+
 	wg.Add(UpdateWorkerSize)
 	for i := 0; i < UpdateWorkerSize; i++ {
 		go tc.worker(ctx, i, wg.Done, ctx.Done())
@@ -466,7 +471,7 @@ func (tc *Controller) processPodOnNode(
 		logger.V(2).Info("Not all taints are tolerated after update for pod on node", "pod", podNamespacedName.String(), "node", klog.KRef("", nodeName))
 		// We're canceling scheduled work (if any), as we're going to delete the Pod right away.
 		tc.cancelWorkWithEvent(logger, podNamespacedName)
-		tc.taintEvictionQueue.AddWork(ctx, NewWorkArgs(podNamespacedName.Name, podNamespacedName.Namespace), now, now)
+		tc.taintEvictionQueue.AddWork(ctx, podNamespacedName, now, now)
 		return
 	}
 	minTolerationTime := getMinTolerationTime(usedTolerations)
@@ -479,15 +484,15 @@ func (tc *Controller) processPodOnNode(
 
 	startTime := now
 	triggerTime := startTime.Add(minTolerationTime)
-	scheduledEviction := tc.taintEvictionQueue.GetWorkerUnsafe(podNamespacedName.String())
-	if scheduledEviction != nil {
+	scheduledEviction, ok := tc.taintEvictionQueue.GetWorkerUnsafe(podNamespacedName.String())
+	if ok {
 		startTime = scheduledEviction.CreatedAt
 		if startTime.Add(minTolerationTime).Before(triggerTime) {
 			return
 		}
 		tc.cancelWorkWithEvent(logger, podNamespacedName)
 	}
-	tc.taintEvictionQueue.AddWork(ctx, NewWorkArgs(podNamespacedName.Name, podNamespacedName.Namespace), startTime, triggerTime)
+	tc.taintEvictionQueue.AddWork(ctx, podNamespacedName, startTime, triggerTime)
 }
 
 func (tc *Controller) handlePodUpdate(ctx context.Context, podUpdate podUpdateItem) {

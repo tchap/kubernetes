@@ -23,6 +23,8 @@ import (
 // NamespacedObject comprises a resource name with a mandatory namespace
 // and optional UID. It gets rendered as "<namespace>/<name>[:<uid>]"
 // (text output) or as an object (JSON output).
+//
+// Deprecated
 type NamespacedObject struct {
 	types.NamespacedName
 	UID types.UID
