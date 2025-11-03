@@ -35,8 +35,6 @@ import (
 	gomegatypes "github.com/onsi/gomega/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/watch"
-
 	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -44,13 +42,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
 	metricstestutil "k8s.io/component-base/metrics/testutil"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controller/devicetainteviction/metrics"
-	"k8s.io/kubernetes/pkg/controller/tainteviction"
 	controllertestutil "k8s.io/kubernetes/pkg/controller/testutil"
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 	"k8s.io/kubernetes/test/utils/ktesting"
@@ -80,7 +78,7 @@ func setup(tb testing.TB) *testContext {
 	tContext.logger = tCtx.Logger()
 	// Always log, not matter what the -v value is.
 	controller.eventLogger = &tContext.logger
-	tContext.evictPod = func(podRef tainteviction.NamespacedObject, fireAt time.Time) {
+	tContext.evictPod = func(podRef namespacedObject, fireAt time.Time) {
 		// Always replace an existing entry for the same pod.
 		index := slices.IndexFunc(tContext.evicting, func(e evictAt) bool {
 			return e.podRef == podRef
@@ -101,7 +99,7 @@ func setup(tb testing.TB) *testContext {
 			return tContext.evicting[i].podRef.Name < tContext.evicting[j].podRef.Name
 		})
 	}
-	tContext.cancelEvict = func(pod tainteviction.NamespacedObject) bool {
+	tContext.cancelEvict = func(pod namespacedObject) bool {
 		index := slices.IndexFunc(tContext.evicting, func(e evictAt) bool { return e.podRef == pod })
 		if index >= 0 {
 			tContext.evicting = slices.Delete(tContext.evicting, index, index+1)
@@ -124,7 +122,7 @@ type testContext struct {
 }
 
 type evictAt struct {
-	podRef tainteviction.NamespacedObject
+	podRef namespacedObject
 	fireAt time.Time
 }
 
@@ -1505,13 +1503,13 @@ func testCancelEviction(tCtx ktesting.TContext, deletePod bool) {
 
 	var mutex sync.Mutex
 	podEvicting := false
-	controller.evictPod = func(podRef tainteviction.NamespacedObject, fireAt time.Time) {
+	controller.evictPod = func(podRef namespacedObject, fireAt time.Time) {
 		assert.Equal(tCtx, newObject(pod), podRef)
 		mutex.Lock()
 		defer mutex.Unlock()
 		podEvicting = true
 	}
-	controller.cancelEvict = func(podRef tainteviction.NamespacedObject) bool {
+	controller.cancelEvict = func(podRef namespacedObject) bool {
 		assert.Equal(tCtx, newObject(pod), podRef)
 		mutex.Lock()
 		defer mutex.Unlock()

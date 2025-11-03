@@ -51,7 +51,7 @@ import (
 	"k8s.io/klog/v2"
 	apipod "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller/devicetainteviction/metrics"
-	"k8s.io/kubernetes/pkg/controller/tainteviction"
+	"k8s.io/kubernetes/pkg/controller/tainteviction/timedworkers"
 	"k8s.io/kubernetes/pkg/features"
 	utilpod "k8s.io/kubernetes/pkg/util/pod"
 )
@@ -97,11 +97,11 @@ type Controller struct {
 
 	// evictPod ensures that the pod gets evicted at the specified time.
 	// It doesn't block.
-	evictPod func(pod tainteviction.NamespacedObject, fireAt time.Time)
+	evictPod func(pod namespacedObject, fireAt time.Time)
 
 	// cancelEvict cancels eviction set up with evictPod earlier.
 	// Idempotent, returns false if there was nothing to cancel.
-	cancelEvict func(pod tainteviction.NamespacedObject) bool
+	cancelEvict func(pod namespacedObject) bool
 
 	// allocatedClaims holds all currently known allocated claims.
 	allocatedClaims map[types.NamespacedName]allocatedClaim // A value is slightly more efficient in BenchmarkTaintUntaint (less allocations!).
@@ -216,12 +216,12 @@ type allocatedClaim struct {
 	evictionTime *metav1.Time
 }
 
-func (tc *Controller) deletePodHandler(c clientset.Interface, emitEventFunc func(tainteviction.NamespacedObject)) func(ctx context.Context, fireAt time.Time, args *tainteviction.WorkArgs) error {
-	return func(ctx context.Context, fireAt time.Time, args *tainteviction.WorkArgs) error {
-		klog.FromContext(ctx).Info("Deleting pod", "pod", args.Object)
+func (tc *Controller) deletePodHandler(c clientset.Interface, emitEventFunc func(object namespacedObject)) func(ctx context.Context, fireAt time.Time, args namespacedObject) error {
+	return func(ctx context.Context, fireAt time.Time, args namespacedObject) error {
+		klog.FromContext(ctx).Info("Deleting pod", "pod", args.NamespacedName)
 		var err error
 		for i := 0; i < retries; i++ {
-			err = addConditionAndDeletePod(ctx, c, args.Object, &emitEventFunc)
+			err = addConditionAndDeletePod(ctx, c, args, &emitEventFunc)
 			if apierrors.IsNotFound(err) {
 				// Not a problem, the work is done.
 				// But we didn't do it, so don't
@@ -239,7 +239,7 @@ func (tc *Controller) deletePodHandler(c clientset.Interface, emitEventFunc func
 	}
 }
 
-func addConditionAndDeletePod(ctx context.Context, c clientset.Interface, podRef tainteviction.NamespacedObject, emitEventFunc *func(tainteviction.NamespacedObject)) (err error) {
+func addConditionAndDeletePod(ctx context.Context, c clientset.Interface, podRef namespacedObject, emitEventFunc *func(namespacedObject)) (err error) {
 	pod, err := c.CoreV1().Pods(podRef.Namespace).Get(ctx, podRef.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -334,22 +334,23 @@ func (tc *Controller) Run(ctx context.Context) error {
 	tc.recorder = eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: tc.name}).WithLogger(logger)
 	defer eventBroadcaster.Shutdown()
 
-	taintEvictionQueue := tainteviction.CreateWorkerQueue(tc.deletePodHandler(tc.client, tc.emitPodDeletionEvent))
+	taintEvictionQueue := timedworkers.CreateWorkerQueue[namespacedObject](tc.deletePodHandler(tc.client, tc.emitPodDeletionEvent))
 	evictPod := tc.evictPod
-	tc.evictPod = func(podRef tainteviction.NamespacedObject, fireAt time.Time) {
+	tc.evictPod = func(podRef namespacedObject, fireAt time.Time) {
 		// Only relevant for testing.
 		if evictPod != nil {
 			evictPod(podRef, fireAt)
 		}
-		taintEvictionQueue.UpdateWork(ctx, &tainteviction.WorkArgs{Object: podRef}, time.Now(), fireAt)
+		taintEvictionQueue.UpdateWork(ctx, podRef, time.Now(), fireAt)
 	}
 	cancelEvict := tc.cancelEvict
-	tc.cancelEvict = func(podRef tainteviction.NamespacedObject) bool {
+	tc.cancelEvict = func(podRef namespacedObject) bool {
 		if cancelEvict != nil {
 			cancelEvict(podRef)
 		}
 		return taintEvictionQueue.CancelWork(logger, podRef.NamespacedName.String())
 	}
+	go taintEvictionQueue.Run(ctx, 1)
 
 	// Start events processing pipeline.
 	eventBroadcaster.StartStructuredLogging(3)
@@ -878,13 +879,13 @@ func (tc *Controller) handlePod(pod *v1.Pod) {
 	}
 }
 
-func (tc *Controller) cancelWorkWithEvent(podRef tainteviction.NamespacedObject) {
+func (tc *Controller) cancelWorkWithEvent(podRef namespacedObject) {
 	if tc.cancelEvict(podRef) {
 		tc.emitCancelPodDeletionEvent(podRef)
 	}
 }
 
-func (tc *Controller) emitPodDeletionEvent(podRef tainteviction.NamespacedObject) {
+func (tc *Controller) emitPodDeletionEvent(podRef namespacedObject) {
 	if tc.recorder == nil {
 		return
 	}
@@ -898,7 +899,7 @@ func (tc *Controller) emitPodDeletionEvent(podRef tainteviction.NamespacedObject
 	tc.recorder.Eventf(ref, v1.EventTypeNormal, "DeviceTaintManagerEviction", "Marking for deletion")
 }
 
-func (tc *Controller) emitCancelPodDeletionEvent(podRef tainteviction.NamespacedObject) {
+func (tc *Controller) emitCancelPodDeletionEvent(podRef namespacedObject) {
 	if tc.recorder == nil {
 		return
 	}
@@ -919,8 +920,8 @@ func newNamespacedName(obj metav1.Object) types.NamespacedName {
 	}
 }
 
-func newObject(obj metav1.Object) tainteviction.NamespacedObject {
-	return tainteviction.NamespacedObject{
+func newObject(obj metav1.Object) namespacedObject {
+	return namespacedObject{
 		NamespacedName: newNamespacedName(obj),
 		UID:            obj.GetUID(),
 	}
