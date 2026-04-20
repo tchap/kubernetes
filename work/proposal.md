@@ -86,48 +86,206 @@ the right signal, but two problems prevent it from being useful:
 2. **It is ignored.** The endpointslice and endpoints controllers do not
    consume `DisruptionTarget` at all.
 
-### Why DisruptionTarget is delayed (verified)
+### Why DisruptionTarget is delayed
 
-`mergePodStatus()` in `pkg/kubelet/status/status_manager.go:1375-1390`
-explicitly gates sending DisruptionTarget:
+The kubelet categorizes pod conditions into three ownership classes
+(`pkg/kubelet/types/pod_status.go`):
+
+- **Owned by kubelet** (`PodConditionByKubelet`, line 36): `PodScheduled`,
+  `PodReady`, `ContainersReady`, etc. -- managed directly in pod status.
+- **Shared** (`PodConditionSharedByKubelet`, line 56): only
+  `DisruptionTarget`. This is the special case -- the kubelet writes it, but
+  other controllers (job controller, taint eviction, scheduler) also write
+  it for their own reasons.
 
 ```go
-if c.Type == v1.DisruptionTarget {
-    if transitioningToTerminalPhase && !couldHaveRunningContainers {
-        // only now send DisruptionTarget to the API server
+// pkg/kubelet/types/pod_status.go:55-58
+func PodConditionSharedByKubelet(conditionType v1.PodConditionType) bool {
+    return conditionType == v1.DisruptionTarget
+}
+```
+
+Because DisruptionTarget is "shared" rather than "owned", it gets special
+handling in `mergePodStatus()` (`pkg/kubelet/status/status_manager.go:1359`).
+This function is called on every status update to decide which conditions
+actually get sent to the API server. The relevant section:
+
+```go
+// pkg/kubelet/status/status_manager.go:1370-1392
+for _, c := range newPodStatus.Conditions {
+    if kubetypes.PodConditionByKubelet(c.Type) {
+        podConditions = append(podConditions, c)       // always sent
+    } else if kubetypes.PodConditionSharedByKubelet(c.Type) {
+        if c.Type == v1.DisruptionTarget {
+            // guard the update of the DisruptionTarget condition with a
+            // check to ensure it will only be sent once all containers
+            // have terminated and the phase is terminal.
+            if transitioningToTerminalPhase && !couldHaveRunningContainers {
+                updateLastTransitionTime(...)
+                if _, c := podutil.GetPodConditionFromList(...); c != nil {
+                    podConditions = statusutil.ReplaceOrAppendPodCondition(podConditions, c)
+                }
+            }
+        }
     }
 }
 ```
 
-This was introduced by [PR #108366](https://github.com/kubernetes/kubernetes/pull/108366)
+The guard `transitioningToTerminalPhase && !couldHaveRunningContainers`
+means DisruptionTarget only reaches the API server after the pod has moved
+from Running to Failed/Succeeded AND all containers have exited. This was
+introduced by [PR #108366](https://github.com/kubernetes/kubernetes/pull/108366)
 to prevent the scheduler from reclaiming resources before containers stop.
 The terminal phase delay is correct and must be preserved. But coupling
 DisruptionTarget to the same gate was unnecessary -- the condition and the
 phase serve different consumers.
 
-### The full timeline today
+### How the kubelet sets DisruptionTarget
+
+All three disruption sources set DisruptionTarget with reason
+`TerminationByKubelet` via a `podStatusFn` callback passed to `killPodFunc`:
+
+**Graceful node shutdown** (`pkg/kubelet/nodeshutdown/nodeshutdown_manager.go:153-166`):
+
+```go
+if err := m.killPodFunc(pod, false, &gracePeriodOverride, func(status *v1.PodStatus) {
+    if status.Phase != v1.PodSucceeded {
+        status.Phase = v1.PodFailed
+    }
+    status.Message = nodeShutdownMessage
+    status.Reason = nodeShutdownReason
+    podutil.UpdatePodCondition(status, &v1.PodCondition{
+        Type:    v1.DisruptionTarget,
+        Status:  v1.ConditionTrue,
+        Reason:  v1.PodReasonTerminationByKubelet,
+        Message: nodeShutdownMessage,
+    })
+}); err != nil {
+```
+
+**Eviction** (`pkg/kubelet/eviction/eviction_manager.go:432-438`):
+
+```go
+condition := &v1.PodCondition{
+    Type:    v1.DisruptionTarget,
+    Status:  v1.ConditionTrue,
+    Reason:  v1.PodReasonTerminationByKubelet,
+    Message: message,
+}
+if m.evictPod(logger, pod, gracePeriodOverride, message, annotations, condition) {
+```
+
+**Kubelet preemption** (`pkg/kubelet/preemption/preemption.go:105-116`):
+
+```go
+err := c.killPodFunc(pod, true, nil, func(status *v1.PodStatus) {
+    status.Phase = v1.PodFailed
+    status.Reason = events.PreemptContainer
+    status.Message = message
+    podutil.UpdatePodCondition(status, &v1.PodCondition{
+        Type:    v1.DisruptionTarget,
+        Status:  v1.ConditionTrue,
+        Reason:  v1.PodReasonTerminationByKubelet,
+        Message: "Pod was preempted by Kubelet to accommodate a critical pod.",
+    })
+})
+```
+
+In all cases, the `podStatusFn` callback sets both the terminal phase and
+DisruptionTarget on the status object. This callback is applied inside
+`SyncTerminatingPod` before `killPod()` is called.
+
+### The full termination timeline
 
 Inside `SyncTerminatingPod` (`pkg/kubelet/kubelet.go:2289`):
 
-```
-Line 2315:  SetPodStatus() -- caches DisruptionTarget + terminal phase
-              ↓ mergePodStatus suppresses BOTH (containers still running)
-Line 2323:  StopLivenessAndStartup()
-Line 2326:  killPod() -- BLOCKS (preStop hooks, SIGTERM, grace period)
-              ... containers running for seconds to minutes ...
-Line 2336:  RemovePod() -- stops readiness probes
-Line 2401:  SetPodStatus() again -- final status
-              ↓ mergePodStatus NOW sends both (containers stopped)
+```go
+// Line 2311-2315: Generate status, apply podStatusFn, cache it
+apiPodStatus := kl.generateAPIPodStatus(ctx, pod, podStatus, false)
+if podStatusFn != nil {
+    podStatusFn(&apiPodStatus)  // sets DisruptionTarget + Failed phase
+}
+kl.statusManager.SetPodStatus(logger, pod, apiPodStatus)
+//   ^-- caches status, sends to podStatusChannel
+//       BUT mergePodStatus suppresses DisruptionTarget AND the phase
+//       because couldHaveRunningContainers is still true
+
+// Line 2323: Stop liveness and startup probes
+kl.probeManager.StopLivenessAndStartup(pod)
+
+// Line 2325-2326: Kill containers (BLOCKS for grace period)
+p := kubecontainer.ConvertPodStatusToRunningPod(kl.getRuntime().Type(), podStatus)
+if err := kl.killPod(ctx, pod, p, gracePeriod); err != nil {
+    // ...
+}
+
+// Line 2336: Remove all probes (including readiness) AFTER containers stop
+kl.probeManager.RemovePod(pod)
+
+// Line 2401-2402: Final status update -- containers now stopped
+apiPodStatus = kl.generateAPIPodStatus(ctx, pod, stoppedPodStatus, true)
+kl.statusManager.SetPodStatus(logger, pod, apiPodStatus)
+//   ^-- NOW mergePodStatus sends both DisruptionTarget and terminal phase
+//       because couldHaveRunningContainers is false
 ```
 
 By the time DisruptionTarget reaches the API server, the containers are dead.
 
-However, the status manager runs a **separate goroutine** that syncs
-cached status to the API asynchronously (`status_manager.go:283`). The
-first `SetPodStatus()` at line 2315 happens **before** `killPod()` at
-line 2326. If `mergePodStatus` stops suppressing DisruptionTarget, the
-condition will reach the API server while containers are still alive --
-during the preStop / SIGTERM grace period.
+### Why modifying `mergePodStatus` is sufficient
+
+The status manager's `SetPodStatus()` (`status_manager.go:464`) caches the
+status and signals its background goroutine via a buffered channel:
+
+```go
+// status_manager.go:993-999 (inside updateStatusInternal)
+m.podStatuses[pod.UID] = newStatus
+
+select {
+case m.podStatusChannel <- struct{}{}:
+default:
+    // there's already a status update pending
+}
+```
+
+The background goroutine (`status_manager.go:283`) picks up the signal and
+patches the API server:
+
+```go
+// status_manager.go:283-294
+go wait.Forever(func() {
+    for {
+        select {
+        case <-m.podStatusChannel:
+            logger.V(4).Info("Syncing updated statuses")
+            m.syncBatch(ctx, false)
+        case <-syncTicker:
+            logger.V(4).Info("Syncing all statuses")
+            m.syncBatch(ctx, true)
+        }
+    }
+}, 0)
+```
+
+The first `SetPodStatus()` at line 2315 happens **before** `killPod()` at
+line 2326. The status sync goroutine runs concurrently with the pod worker
+that executes `killPod()`. If `mergePodStatus` stops suppressing
+DisruptionTarget, the condition will reach the API server while containers
+are still alive -- during the preStop / SIGTERM grace period.
+
+The terminal phase delay (lines 1411-1417) is separate and remains intact:
+
+```go
+// pkg/kubelet/status/status_manager.go:1411-1417
+if transitioningToTerminalPhase {
+    if couldHaveRunningContainers {
+        newPodStatus.Phase = oldPodStatus.Phase     // keep Running
+        newPodStatus.Reason = oldPodStatus.Reason
+        newPodStatus.Message = oldPodStatus.Message
+    }
+}
+```
+
+This preserves the scheduler resource-reclaim invariant from PR #108366.
 
 ---
 
@@ -160,9 +318,51 @@ beyond networking.
 ### Pod deletion (`deletionTimestamp`)
 
 The endpointslice controller already uses `deletionTimestamp` as a
-termination signal (`ShouldPodBeInEndpoints()` at
-`staging/src/k8s.io/endpointslice/util/controller_utils.go:192`). This
-works well for graceful deletion but cannot be used for kubelet-initiated
+termination signal. This is visible in two places:
+
+**`ShouldPodBeInEndpoints()`** (`staging/src/k8s.io/endpointslice/util/controller_utils.go:180-197`)
+decides whether a pod should appear in any EndpointSlice:
+
+```go
+func ShouldPodBeInEndpoints(pod *v1.Pod, includeTerminating bool) bool {
+    if isPodTerminal(pod) {           // Succeeded or Failed -> exclude
+        return false
+    }
+    if len(pod.Status.PodIP) == 0 && len(pod.Status.PodIPs) == 0 {
+        return false                  // no IP -> exclude
+    }
+    if !includeTerminating && pod.DeletionTimestamp != nil {
+        return false                  // terminating + not wanted -> exclude
+    }
+    return true
+}
+```
+
+**`podToEndpoint()`** (`staging/src/k8s.io/endpointslice/utils.go:38-72`)
+translates a pod into an EndpointSlice entry. The `terminating` field drives
+the `ready` field:
+
+```go
+func podToEndpoint(pod *v1.Pod, node *v1.Node, service *v1.Service,
+    addressType discovery.AddressType) discovery.Endpoint {
+
+    serving := endpointutil.IsPodReady(pod)
+    terminating := pod.DeletionTimestamp != nil          // <-- only signal
+    ready := service.Spec.PublishNotReadyAddresses || (serving && !terminating)
+
+    ep := discovery.Endpoint{
+        Conditions: discovery.EndpointConditions{
+            Ready:       &ready,
+            Serving:     &serving,
+            Terminating: &terminating,
+        },
+        // ...
+    }
+    return ep
+}
+```
+
+This works well for graceful deletion but cannot be used for kubelet-initiated
 disruption:
 
 - Graceful node shutdown cannot delete pods because the node might return.
@@ -176,22 +376,194 @@ action, or automated drain).
 ### DisruptionTarget condition
 
 `DisruptionTarget` (GA since v1.31, gate removed in v1.34) signals that a
-pod is being disrupted by infrastructure. Set by the kubelet during:
-
-- Eviction (`pkg/kubelet/eviction/eviction_manager.go:432-438`)
-- Graceful node shutdown (`pkg/kubelet/nodeshutdown/nodeshutdown_manager.go:160-166`)
-- Preemption (`pkg/kubelet/preemption/preemption.go:109-115`)
+pod is being disrupted by infrastructure. It is set in all three kubelet
+disruption paths (shown above in "How the kubelet sets DisruptionTarget").
 
 Its scope is intentionally restricted to infrastructure-initiated
 disruptions. Workload-caused exits (container exit, OOM) are excluded to
 preserve the job controller's ability to safely retry pods.
 
-Currently consumed only by: job controller (failure policy), taint eviction
-controller, pod GC controller, scheduler preemption. Zero references in
-any endpoints controller code.
+**Endpoint change detection** does not see DisruptionTarget today.
+`podEndpointsChanged()` (`staging/src/k8s.io/endpointslice/util/controller_utils.go:208-244`)
+determines whether a pod update should trigger endpoint reconciliation. It
+checks three things and none of them detect DisruptionTarget:
+
+```go
+func podEndpointsChanged(oldPod, newPod *v1.Pod) (bool, bool) {
+    labelsChanged := false
+    if !reflect.DeepEqual(newPod.Labels, oldPod.Labels) ||
+        !hostNameAndDomainAreEqual(newPod, oldPod) {
+        labelsChanged = true
+    }
+
+    // 1. DeletionTimestamp changed
+    if newPod.DeletionTimestamp != oldPod.DeletionTimestamp {
+        return true, labelsChanged
+    }
+    // 2. Readiness changed
+    if IsPodReady(oldPod) != IsPodReady(newPod) {
+        return true, labelsChanged
+    }
+    // 3. Pod IPs changed
+    if len(oldPod.Status.PodIPs) != len(newPod.Status.PodIPs) {
+        return true, labelsChanged
+    }
+    for i := range oldPod.Status.PodIPs {
+        if oldPod.Status.PodIPs[i].IP != newPod.Status.PodIPs[i].IP {
+            return true, labelsChanged
+        }
+    }
+    return false, labelsChanged
+}
+```
+
+If DisruptionTarget appears on a pod and nothing else changes, the
+endpointslice controller will not reconcile. This must be fixed for Phase 1.
+
+Currently DisruptionTarget is referenced by six controllers. Zero references
+exist in any endpoints controller code. The following analysis verifies that
+sending DisruptionTarget early (on a Running pod, before containers stop) is
+safe for every existing consumer.
+
+#### Consumer 1: Job controller -- pod failure policy
+
+`matchPodFailurePolicy()` (`pkg/controller/job/pod_failure_policy.go:36`)
+matches pod conditions (including DisruptionTarget) against user-defined
+failure policy rules:
+
+```go
+func matchPodFailurePolicy(podFailurePolicy *batch.PodFailurePolicy,
+    failedPod *v1.Pod) (*string, bool, *batch.PodFailurePolicyAction) {
+    // ...
+    for index, podFailurePolicyRule := range podFailurePolicy.Rules {
+        // matches on exit codes OR on pod conditions like DisruptionTarget
+    }
+}
+```
+
+**Why it is safe**: The function is only called on pods that have already
+been classified as failed. All call sites guard with `isPodFailed(pod, job)`
+(`job_controller.go:2169`), which requires `pod.Status.Phase == PodFailed`
+or `pod.DeletionTimestamp != nil`:
+
+```go
+// pkg/controller/job/job_controller.go:2169-2179
+func isPodFailed(p *v1.Pod, job *batch.Job) bool {
+    if p.Status.Phase == v1.PodFailed {
+        return true
+    }
+    if onlyReplaceFailedPods(job) {
+        return false
+    }
+    return p.DeletionTimestamp != nil && p.Status.Phase != v1.PodSucceeded
+}
+```
+
+Since our change continues to delay the terminal phase transition, a Running
+pod with early DisruptionTarget will never enter this code path.
+
+**Verdict: SAFE** -- no behavior change.
+
+#### Consumer 2: Taint eviction controller
+
+`addConditionAndDeletePod()` (`pkg/controller/tainteviction/taint_eviction.go:129`)
+**sets** DisruptionTarget on a pod (with reason `DeletionByTaintManager`)
+and then deletes it. This controller is a **producer** of the condition. It
+never reads or reacts to DisruptionTarget set by others.
+
+**Verdict: SAFE** -- only writes the condition.
+
+#### Consumer 3: Device taint eviction controller
+
+Same pattern as the taint eviction controller.
+`device_taint_eviction.go:482` **sets** DisruptionTarget with reason
+`DeletionByDeviceTaintManager` before deleting the pod.
+
+**Verdict: SAFE** -- only writes the condition.
+
+#### Consumer 4: Pod GC controller
+
+`gc_controller.go:253` **sets** DisruptionTarget on orphaned pods (pods
+assigned to deleted nodes, with reason `DeletionByPodGC`) before deleting
+them. Producer only.
+
+**Verdict: SAFE** -- only writes the condition.
+
+#### Consumer 5: Scheduler preemption
+
+Two interactions:
+
+- **Producer** (`pkg/scheduler/framework/preemption/executor.go:125`): Sets
+  DisruptionTarget with reason `PreemptionByScheduler` on preemption
+  victims, then immediately deletes them. This goes through the API server
+  directly (not through the kubelet status manager), so our `mergePodStatus`
+  change does not affect it.
+- **Reader** (`pkg/scheduler/framework/plugins/defaultpreemption/default_preemption.go:401`):
+  `podTerminatingByPreemption()` checks for DisruptionTarget with reason
+  `PreemptionByScheduler`, but **only after** confirming
+  `pod.DeletionTimestamp != nil` (line 402). During kubelet-initiated
+  disruption, DeletionTimestamp is not set, so this function returns false
+  regardless of DisruptionTarget.
+
+**Verdict: SAFE** -- the producer bypasses the kubelet status manager; the
+reader requires DeletionTimestamp which is absent during kubelet disruption.
+
+#### Consumer 6: PDB / Disruption controller -- stale condition cleanup
+
+`nonTerminatingPodHasStaleDisruptionCondition()` (`pkg/controller/disruption/disruption.go:1041`)
+monitors for DisruptionTarget conditions that linger on non-terminal pods
+without the pod being deleted. After a 2-minute timeout, it resets the
+condition to `False`.
+
+**Why it is safe**: The function **explicitly exempts** kubelet-originated
+conditions:
+
+```go
+// pkg/controller/disruption/disruption.go:1041-1057
+func (dc *DisruptionController) nonTerminatingPodHasStaleDisruptionCondition(
+    pod *v1.Pod) (bool, time.Duration) {
+
+    if pod.DeletionTimestamp != nil {
+        return false, 0
+    }
+    _, cond := apipod.GetPodCondition(&pod.Status, v1.DisruptionTarget)
+    // Pod disruption conditions added by kubelet are never considered stale
+    // because the condition might take arbitrarily long before the pod is
+    // terminating (has deletion timestamp).
+    if cond == nil || cond.Status != v1.ConditionTrue ||
+        cond.Reason == v1.PodReasonTerminationByKubelet ||   // <-- exemption
+        apipod.IsPodPhaseTerminal(pod.Status.Phase) {
+        return false, 0
+    }
+    waitFor := dc.stalePodDisruptionTimeout - dc.clock.Since(cond.LastTransitionTime.Time)
+    if waitFor < 0 { waitFor = 0 }
+    return true, waitFor
+}
+```
+
+DisruptionTarget with reason `TerminationByKubelet` (which is what the
+kubelet sets during eviction, shutdown, and preemption) is never considered
+stale, regardless of how long it has been present or whether the pod has a
+DeletionTimestamp. The PDB controller was designed anticipating that
+kubelet-set DisruptionTarget could appear on non-terminal pods.
+
+**Verdict: SAFE** -- kubelet-originated conditions are explicitly exempted
+from stale cleanup.
+
+#### Summary
+
+| Consumer | Role | Reads condition? | Guards on terminal phase? | Safe? |
+|----------|------|:----------------:|:-------------------------:|:-----:|
+| Job controller | Reader | Yes | Yes (`isPodFailed` requires `PodFailed` or deleted) | Yes |
+| Taint eviction | Producer | No | N/A | Yes |
+| Device taint eviction | Producer | No | N/A | Yes |
+| Pod GC | Producer | No | N/A | Yes |
+| Scheduler preemption | Both | Yes | Yes (`DeletionTimestamp != nil` required) | Yes |
+| PDB controller | Reader | Yes | No, but exempts `TerminationByKubelet` reason | Yes |
 
 **This is the right signal for Phase 1** -- it already exists, is already
-set at the right time, and just needs to be unblocked and consumed.
+set at the right time, every existing consumer is safe with early
+propagation, and it just needs to be unblocked and consumed.
 
 ### PendingTermination condition (proposed)
 
@@ -225,7 +597,22 @@ No new API types. Leverages an existing GA condition. Two changes:
 Modify `mergePodStatus()` in `pkg/kubelet/status/status_manager.go` to
 decouple DisruptionTarget from the terminal phase gate. When the feature
 gate is enabled, send DisruptionTarget immediately. When disabled, preserve
-the existing behavior:
+the existing behavior.
+
+**Current code** (lines 1375-1390):
+
+```go
+if c.Type == v1.DisruptionTarget {
+    if transitioningToTerminalPhase && !couldHaveRunningContainers {
+        updateLastTransitionTime(&newPodStatus, &oldPodStatus, c.Type)
+        if _, c := podutil.GetPodConditionFromList(newPodStatus.Conditions, c.Type); c != nil {
+            podConditions = statusutil.ReplaceOrAppendPodCondition(podConditions, c)
+        }
+    }
+}
+```
+
+**Proposed change**:
 
 ```go
 if c.Type == v1.DisruptionTarget {
@@ -239,31 +626,147 @@ if c.Type == v1.DisruptionTarget {
 }
 ```
 
-The terminal phase delay (lines 1411-1417) remains unchanged. The scheduler
-resource-reclaim invariant from PR #108366 is preserved.
+When the gate is enabled, the `||` short-circuits and DisruptionTarget is
+sent immediately, regardless of phase or container state. When the gate is
+disabled, the existing condition applies unchanged.
 
-**Why this is timely enough**: `SetPodStatus()` is called at line 2315,
-before `killPod()` at line 2326. The status manager's sync goroutine runs
-concurrently and will PATCH the API server while containers are still alive.
-`mergePodStatus` is the **only gate** preventing early propagation.
+The terminal phase delay (lines 1411-1417) remains untouched:
+
+```go
+if transitioningToTerminalPhase {
+    if couldHaveRunningContainers {
+        newPodStatus.Phase = oldPodStatus.Phase    // keep Running
+        newPodStatus.Reason = oldPodStatus.Reason
+        newPodStatus.Message = oldPodStatus.Message
+    }
+}
+```
+
+The scheduler resource-reclaim invariant from PR #108366 is preserved.
+
+**Why this is timely enough**: `SetPodStatus()` is called at
+`kubelet.go:2315`, before `killPod()` at line 2326. `SetPodStatus` caches
+the status and pushes to `podStatusChannel` (`status_manager.go:996`). The
+background sync goroutine (`status_manager.go:283`) picks it up and PATCHes
+the API server. This goroutine runs concurrently with the pod worker that
+executes `killPod()`. So the API server receives the update while containers
+are still alive. `mergePodStatus` is the **only gate** preventing early
+propagation.
 
 #### 2. Endpoints controllers: consume DisruptionTarget
 
 **Endpointslice controller** (staging library):
 
-- `podToEndpoint()` (`staging/src/k8s.io/endpointslice/utils.go:40`):
-  Set `terminating = true` when DisruptionTarget is present (in addition
-  to `DeletionTimestamp`). This cascades to `Ready=false` automatically.
-- `podEndpointsChanged()` (`staging/.../util/controller_utils.go:208`):
-  Detect DisruptionTarget condition changes to trigger reconciliation.
-  This check is unconditional (cheap, harmless when gate is off).
-- Wire the feature gate via `ReconcilerOption` (matching the existing
-  `WithPreferSameTrafficDistributionEnabled` pattern).
+**`podToEndpoint()`** (`staging/src/k8s.io/endpointslice/utils.go:38`):
+Currently derives `terminating` solely from `DeletionTimestamp`:
+
+```go
+serving := endpointutil.IsPodReady(pod)
+terminating := pod.DeletionTimestamp != nil
+ready := service.Spec.PublishNotReadyAddresses || (serving && !terminating)
+```
+
+Change: also set `terminating = true` when DisruptionTarget is present
+(controlled by the feature gate, passed via a new parameter):
+
+```go
+serving := endpointutil.IsPodReady(pod)
+terminating := pod.DeletionTimestamp != nil
+if !terminating && disruptionTargetSignalsTerminating {
+    terminating = hasDisruptionTargetCondition(pod)
+}
+ready := service.Spec.PublishNotReadyAddresses || (serving && !terminating)
+```
+
+This cascades: when `terminating` is true, `ready` becomes false (unless
+`PublishNotReadyAddresses` is set), and the `Terminating` field in the
+EndpointSlice is set to true. Downstream consumers (kube-proxy, service
+meshes) already handle this field.
+
+**`podEndpointsChanged()`** (`staging/src/k8s.io/endpointslice/util/controller_utils.go:208`):
+Add detection of DisruptionTarget condition changes, unconditionally (the
+check is cheap -- scanning a short condition list -- and harmless when the
+gate is off, since the reconciler will produce the same output):
+
+```go
+// After the DeletionTimestamp check (line 218-220), before readiness:
+if hasDisruptionTargetCondition(oldPod) != hasDisruptionTargetCondition(newPod) {
+    return true, labelsChanged
+}
+```
+
+**Wire the feature gate via `ReconcilerOption`**: The staging library cannot
+import `pkg/features/` (it's a staged module). The existing pattern for this
+is `ReconcilerOption` functions. The `Reconciler` struct
+(`staging/src/k8s.io/endpointslice/reconciler.go:45`) already uses this
+pattern:
+
+```go
+// reconciler.go:63-71
+type ReconcilerOption func(*Reconciler)
+
+func WithPreferSameTrafficDistributionEnabled(preferSame bool) ReconcilerOption {
+    return func(r *Reconciler) {
+        r.preferSameTrafficDistribution = preferSame
+    }
+}
+```
+
+Add a matching option:
+
+```go
+func WithDisruptionTargetSignalsTerminating(enabled bool) ReconcilerOption {
+    return func(r *Reconciler) {
+        r.disruptionTargetSignalsTerminating = enabled
+    }
+}
+```
+
+Wire it in `pkg/controller/endpointslice/endpointslice_controller.go:178`,
+alongside the existing option:
+
+```go
+// endpointslice_controller.go:178-187 (current)
+c.reconciler = endpointslicerec.NewReconciler(
+    c.client,
+    c.nodeLister,
+    c.maxEndpointsPerSlice,
+    c.endpointSliceTracker,
+    c.topologyCache,
+    c.eventRecorder,
+    ControllerName,
+    endpointslicerec.WithPreferSameTrafficDistributionEnabled(
+        utilfeature.DefaultFeatureGate.Enabled(features.PreferSameTrafficDistribution)),
+    // NEW:
+    endpointslicerec.WithDisruptionTargetSignalsTerminating(
+        utilfeature.DefaultFeatureGate.Enabled(features.DisruptionTargetSignalsEndpointTerminating)),
+)
+```
+
+The reconciler already calls `ShouldPodBeInEndpoints(pod, true)` at line 191
+(always includes terminating pods) and `podToEndpoint()` at line 228 -- the
+new `terminating` logic flows through these existing call sites.
 
 **Legacy endpoints controller** (`pkg/controller/endpoint/endpoints_controller.go`):
 
-- `addEndpointSubset()` (line 640): When the gate is enabled and
-  DisruptionTarget is present, treat the pod as not-ready.
+`addEndpointSubset()` (line 632) sorts pods into ready vs not-ready subsets.
+Currently the ready/not-ready decision depends only on `IsPodReady()`:
+
+```go
+// endpoints_controller.go:640
+if tolerateUnreadyEndpoints || podutil.IsPodReady(pod) {
+    subsets = append(subsets, v1.EndpointSubset{
+        Addresses: []v1.EndpointAddress{epa}, Ports: ports,
+    })
+} else {
+    subsets = append(subsets, v1.EndpointSubset{
+        NotReadyAddresses: []v1.EndpointAddress{epa}, Ports: ports,
+    })
+}
+```
+
+When the gate is enabled and DisruptionTarget is present, treat the pod
+as not-ready regardless of `IsPodReady()`.
 
 #### Feature gate
 
@@ -277,11 +780,29 @@ only appears on pods in a terminal phase.
 
 ```
 T+0s   Kubelet receives shutdown signal
-T+0s   Kubelet sets DisruptionTarget=True in status cache
-T+0s   Status manager sends DisruptionTarget to API server    <-- NEW
-T+~1s  Endpointslice controller marks endpoint Terminating    <-- NEW
-T+~2s  kube-proxy updates iptables, traffic stops flowing
-T+Ns   preStop hook runs, SIGTERM sent, containers stop
+T+0s   killPodFunc callback sets DisruptionTarget + Failed phase on status
+T+0s   SyncTerminatingPod calls SetPodStatus (kubelet.go:2315)
+         -> mergePodStatus: sends DisruptionTarget (gate on), holds phase
+         -> updateStatusInternal caches status, signals podStatusChannel
+T+0s   Status sync goroutine (status_manager.go:283) picks up signal
+         -> syncBatch -> syncPod -> PatchPodStatus to API server
+T+~1s  Endpointslice controller sees DisruptionTarget in pod watch
+         -> podEndpointsChanged returns true (new check)
+         -> podToEndpoint sets Terminating=true, Ready=false
+         -> EndpointSlice patched
+T+~2s  kube-proxy picks up EndpointSlice change, updates iptables
+T+Ns   killPod() finishes: preStop hook runs, SIGTERM sent, containers stop
+T+Ns   Final SetPodStatus (kubelet.go:2402): phase now sent too
+```
+
+Compare with today:
+
+```
+T+0s   Kubelet receives shutdown signal
+T+0s   SetPodStatus -> mergePodStatus suppresses EVERYTHING
+T+Ns   killPod() finishes, containers stop
+T+Ns   Final SetPodStatus -> mergePodStatus sends DisruptionTarget + phase
+T+N+1s Endpointslice controller reacts, but pod is dead
 ```
 
 #### What Phase 1 does NOT cover
@@ -289,16 +810,6 @@ T+Ns   preStop hook runs, SIGTERM sent, containers stop
 - Pods that terminate because their main process exits (RestartNever Jobs).
 - Pods that exceed their `activeDeadlineSeconds`.
 - Any termination not initiated by infrastructure disruption.
-
-#### Job controller safety (verified)
-
-The job controller uses DisruptionTarget for pod failure policy retry
-decisions. Sending DisruptionTarget early could theoretically cause
-premature retries. However, the job controller
-(`pkg/controller/job/pod_failure_policy.go`) only evaluates conditions on
-pods that have reached a terminal phase. Since we continue to delay the
-terminal phase transition, the job controller will not see DisruptionTarget
-on a Running pod. No behavior change for jobs.
 
 ### Phase 2: PendingTermination condition (future KEP)
 
@@ -494,12 +1005,29 @@ resources are released.
 
 | Component | File | Key Lines |
 |-----------|------|-----------|
-| DisruptionTarget delay | `pkg/kubelet/status/status_manager.go` | 1375-1390 |
-| Terminal phase delay | `pkg/kubelet/status/status_manager.go` | 1411-1417 |
-| SyncTerminatingPod | `pkg/kubelet/kubelet.go` | 2289-2408 |
-| EndpointSlice terminating | `staging/src/k8s.io/endpointslice/utils.go` | 40 |
-| ShouldPodBeInEndpoints | `staging/.../util/controller_utils.go` | 180-197 |
-| Endpoint change detection | `staging/.../util/controller_utils.go` | 208-244 |
-| Node shutdown sets condition | `pkg/kubelet/nodeshutdown/nodeshutdown_manager.go` | 160-166 |
-| Eviction sets condition | `pkg/kubelet/eviction/eviction_manager.go` | 432-438 |
-| Legacy endpoints ready check | `pkg/controller/endpoint/endpoints_controller.go` | 640 |
+| Condition ownership classification | `pkg/kubelet/types/pod_status.go` | 36-58 |
+| DisruptionTarget suppression | `pkg/kubelet/status/status_manager.go` | 1375-1390 |
+| Terminal phase delay (must preserve) | `pkg/kubelet/status/status_manager.go` | 1411-1417 |
+| Status cache + channel signal | `pkg/kubelet/status/status_manager.go` | 993-999 |
+| Background sync goroutine | `pkg/kubelet/status/status_manager.go` | 283-294 |
+| SetPodStatus entry point | `pkg/kubelet/status/status_manager.go` | 464-488 |
+| updateStatusInternal (cache + notify) | `pkg/kubelet/status/status_manager.go` | 849-1012 |
+| syncBatch (picks up changes) | `pkg/kubelet/status/status_manager.go` | 1075-1148 |
+| SyncTerminatingPod (full sequence) | `pkg/kubelet/kubelet.go` | 2289-2408 |
+| First SetPodStatus (before kill) | `pkg/kubelet/kubelet.go` | 2315 |
+| killPod (blocks during grace period) | `pkg/kubelet/kubelet.go` | 2326 |
+| Final SetPodStatus (after kill) | `pkg/kubelet/kubelet.go` | 2402 |
+| Node shutdown sets DisruptionTarget | `pkg/kubelet/nodeshutdown/nodeshutdown_manager.go` | 153-166 |
+| Eviction sets DisruptionTarget | `pkg/kubelet/eviction/eviction_manager.go` | 432-438 |
+| Kubelet preemption sets DisruptionTarget | `pkg/kubelet/preemption/preemption.go` | 105-116 |
+| podToEndpoint (terminating from DeletionTimestamp only) | `staging/src/k8s.io/endpointslice/utils.go` | 38-72 |
+| ShouldPodBeInEndpoints | `staging/src/k8s.io/endpointslice/util/controller_utils.go` | 180-197 |
+| podEndpointsChanged (no DisruptionTarget check) | `staging/src/k8s.io/endpointslice/util/controller_utils.go` | 208-244 |
+| Reconciler struct + ReconcilerOption | `staging/src/k8s.io/endpointslice/reconciler.go` | 45-71 |
+| Reconciler calls ShouldPodBeInEndpoints | `staging/src/k8s.io/endpointslice/reconciler.go` | 191 |
+| Reconciler calls podToEndpoint | `staging/src/k8s.io/endpointslice/reconciler.go` | 228 |
+| NewReconciler wiring | `pkg/controller/endpointslice/endpointslice_controller.go` | 178-187 |
+| Legacy addEndpointSubset | `pkg/controller/endpoint/endpoints_controller.go` | 632-655 |
+| Job isPodFailed guard | `pkg/controller/job/job_controller.go` | 2169-2179 |
+| matchPodFailurePolicy | `pkg/controller/job/pod_failure_policy.go` | 36-82 |
+| PDB stale condition exemption | `pkg/controller/disruption/disruption.go` | 1041-1057 |
