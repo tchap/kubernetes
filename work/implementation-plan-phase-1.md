@@ -43,6 +43,8 @@ DisruptionTargetSignalsEndpointTerminating: {
 **Follows pattern of**: `CRIListStreaming` (constant at line ~121, spec at
 line ~1297).
 
+No tests needed -- the feature gate framework is tested generically.
+
 ---
 
 ## Step 2: Kubelet -- Send DisruptionTarget Early
@@ -116,6 +118,23 @@ import (
 Check if already imported; `status_manager.go` may not currently import
 these.
 
+### Tests
+
+**File**: `pkg/kubelet/status/status_manager_test.go`  
+**Location**: `TestMergePodStatus` (line ~1659)
+
+Add test cases:
+
+1. **DisruptionTarget sent while phase stays Running (gate enabled)**:
+   - `hasRunningContainers: true`, phase attempts Running -> Failed
+   - DisruptionTarget in newPodStatus
+   - Gate on: expect DisruptionTarget IS in output, phase reverted to Running
+   - This is the new behavior -- condition sent early, phase still delayed.
+
+2. **DisruptionTarget still delayed (gate disabled)**:
+   - Same setup, gate off
+   - Expect DisruptionTarget NOT in output (existing behavior preserved)
+
 ---
 
 ## Step 3: Endpoint Change Detection
@@ -166,6 +185,15 @@ func hasDisruptionTargetCondition(pod *v1.Pod) bool {
     return false
 }
 ```
+
+### Tests
+
+**File**: `staging/src/k8s.io/endpointslice/util/controller_utils_test.go`  
+**Location**: `TestPodEndpointsChanged` (line ~520)
+
+Add modifier for DisruptionTarget condition (similar to existing "mark for
+deletion" modifier at line ~551). Test that appearance of DisruptionTarget
+returns `podChanged=true`.
 
 ---
 
@@ -219,6 +247,17 @@ endpoint := podToEndpoint(pod, node, service, addressType)
 endpoint := podToEndpoint(pod, node, service, addressType, r.disruptionTargetSignalsTerminating)
 ```
 
+### Tests
+
+**File**: `staging/src/k8s.io/endpointslice/utils_test.go`
+
+Add test cases in the existing `TestPodToEndpoint` or similar:
+
+1. Pod with DisruptionTarget=True, no DeletionTimestamp, flag enabled:
+   - Expect `Terminating=true`, `Ready=false`, `Serving=<actual readiness>`
+2. Same pod, flag disabled:
+   - Expect `Terminating=false`, `Ready=<actual readiness>`
+
 ---
 
 ## Step 5: Wire Feature Gate into Reconciler
@@ -267,6 +306,8 @@ c.reconciler = endpointslicerec.NewReconciler(
 )
 ```
 
+No dedicated tests -- the wiring is exercised by the integration test below.
+
 ---
 
 ## Step 6: Legacy Endpoints Controller
@@ -302,55 +343,16 @@ endpointslice util package or duplicated here (it's 5 lines).
 Note: the legacy Endpoints API is deprecated but still active. This
 change ensures consistent behavior across both controllers.
 
----
-
-## Step 7: Tests
-
-### 7a. Unit: `mergePodStatus` -- DisruptionTarget sent early
-
-**File**: `pkg/kubelet/status/status_manager_test.go`  
-**Location**: `TestMergePodStatus` (line ~1659)
-
-Add test cases:
-
-1. **DisruptionTarget sent while phase stays Running (gate enabled)**:
-   - `hasRunningContainers: true`, phase attempts Running -> Failed
-   - DisruptionTarget in newPodStatus
-   - Gate on: expect DisruptionTarget IS in output, phase reverted to Running
-   - This is the new behavior -- condition sent early, phase still delayed.
-
-2. **DisruptionTarget still delayed (gate disabled)**:
-   - Same setup, gate off
-   - Expect DisruptionTarget NOT in output (existing behavior preserved)
-
-### 7b. Unit: `podToEndpoint` with DisruptionTarget
-
-**File**: `staging/src/k8s.io/endpointslice/utils_test.go`
-
-Add test cases in the existing `TestPodToEndpoint` or similar:
-
-1. Pod with DisruptionTarget=True, no DeletionTimestamp, flag enabled:
-   - Expect `Terminating=true`, `Ready=false`, `Serving=<actual readiness>`
-2. Same pod, flag disabled:
-   - Expect `Terminating=false`, `Ready=<actual readiness>`
-
-### 7c. Unit: `podEndpointsChanged` with DisruptionTarget
-
-**File**: `staging/src/k8s.io/endpointslice/util/controller_utils_test.go`  
-**Location**: `TestPodEndpointsChanged` (line ~520)
-
-Add modifier for DisruptionTarget condition (similar to existing "mark for
-deletion" modifier at line ~551). Test that appearance of DisruptionTarget
-returns `podChanged=true`.
-
-### 7d. Unit: `addEndpointSubset` with DisruptionTarget
+### Tests
 
 **File**: `pkg/controller/endpoint/endpoints_controller_test.go`
 
 Test that a ready pod with DisruptionTarget is placed in `NotReadyAddresses`
-when the gate is enabled.
+when the gate is enabled, and in `Addresses` when the gate is disabled.
 
-### 7e. Integration: EndpointSlice terminating via DisruptionTarget
+---
+
+## Step 7: Integration Test
 
 **File**: `test/integration/endpointslice/endpointsliceterminating_test.go`
 
@@ -365,6 +367,9 @@ Add a new test function `TestEndpointSliceDisruptionTargetTerminating`:
 5. Verify `Serving` is still true (pod is technically still serving, just
    being disrupted).
 
+This exercises the full pipeline: change detection (Step 3), endpoint
+translation (Step 4), reconciler wiring (Step 5).
+
 ---
 
 ## File Summary
@@ -374,11 +379,11 @@ Add a new test function `TestEndpointSliceDisruptionTargetTerminating`:
 | `pkg/features/kube_features.go` | Add `DisruptionTargetSignalsEndpointTerminating` gate |
 | `pkg/kubelet/status/status_manager.go` | Send DisruptionTarget immediately when gate enabled |
 | `pkg/kubelet/status/status_manager_test.go` | Test early sending with gate on/off |
-| `staging/src/k8s.io/endpointslice/reconciler.go` | Add `disruptionTargetSignalsTerminating` field + option |
-| `staging/src/k8s.io/endpointslice/utils.go` | `podToEndpoint()`: mark disrupted pods terminating |
-| `staging/src/k8s.io/endpointslice/utils_test.go` | Test `podToEndpoint` with DisruptionTarget |
 | `staging/src/k8s.io/endpointslice/util/controller_utils.go` | `podEndpointsChanged()`: detect DisruptionTarget changes; add helper |
 | `staging/src/k8s.io/endpointslice/util/controller_utils_test.go` | Test change detection |
+| `staging/src/k8s.io/endpointslice/utils.go` | `podToEndpoint()`: mark disrupted pods terminating |
+| `staging/src/k8s.io/endpointslice/utils_test.go` | Test `podToEndpoint` with DisruptionTarget |
+| `staging/src/k8s.io/endpointslice/reconciler.go` | Add `disruptionTargetSignalsTerminating` field + option |
 | `pkg/controller/endpointslice/endpointslice_controller.go` | Wire gate into reconciler option |
 | `pkg/controller/endpoint/endpoints_controller.go` | Treat disrupted pods as not-ready |
 | `pkg/controller/endpoint/endpoints_controller_test.go` | Test legacy controller behavior |

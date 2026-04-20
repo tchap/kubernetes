@@ -1,9 +1,7 @@
 # Disrupted Pods Should Be Removed from Endpoints
 
 Reported in [issue #116965](https://github.com/kubernetes/kubernetes/issues/116965) and [issue #124648](https://github.com/kubernetes/kubernetes/issues/124648)  
-Proof of concept in [PR #125774](https://github.com/kubernetes/kubernetes/pull/125774)  
-Reviewed with mimowo@, aojea@, bobbypage@, yujuhong@  
-Shared with sig-node, sig-network, and sig-apps
+Proof of concept in [PR #125774](https://github.com/kubernetes/kubernetes/pull/125774)
 
 ---
 
@@ -42,13 +40,162 @@ failures that are entirely avoidable.
 
 ### Where this happens in practice
 
-- **Graceful node shutdown**: A cloud VM is reclaimed (spot instance) or an
-  admin reboots a node. The kubelet terminates pods but never deletes them
-  because the node might return.
-- **Eviction**: The kubelet evicts pods due to resource pressure (disk,
-  memory, PID limits).
-- **Preemption**: The kubelet preempts lower-priority pods to make room for
-  a critical pod.
+To understand the gap, it helps to first see what happens during graceful
+deletion -- the case that works -- and then contrast it with the three
+kubelet-initiated disruption paths.
+
+#### Graceful deletion (the working case)
+
+When a user or controller calls `DELETE` on a pod (e.g. `kubectl delete pod`,
+or a Deployment rolling out a new ReplicaSet), the API server sets
+`metadata.deletionTimestamp` on the pod object. The pod is **not removed**
+from etcd yet -- it enters a "terminating" state. The kubelet's pod worker
+sees `DeletionTimestamp != nil` (`pod_workers.go:871-875`) and enters its
+termination sequence:
+
+```go
+// pod_workers.go:871-875
+case pod.DeletionTimestamp != nil:
+    updateLogger.V(4).Info("Pod is marked for graceful deletion, begin teardown")
+    status.deleted = true
+    status.terminatingAt = now
+    becameTerminating = true
+```
+
+The endpointslice controller independently watches pod objects. When it sees
+`DeletionTimestamp` set, two things happen:
+
+- `ShouldPodBeInEndpoints()` (`controller_utils.go:192`) can exclude the pod.
+- `podToEndpoint()` (`utils.go:40`) sets `Terminating=true`, which forces
+  `Ready=false`.
+
+So the endpoint is updated **immediately** when the delete call is made --
+well before containers stop. The kubelet's `preStop` hook and SIGTERM grace
+period provide a window (seconds to minutes) for load balancers to drain
+the pod.
+
+**Key point**: `deletionTimestamp` is an API-level signal visible to all
+controllers watching the pod. It arrives at the moment the decision to
+terminate is made, not when termination completes.
+
+#### Graceful node shutdown
+
+A cloud VM is being reclaimed (spot instance) or an admin reboots a node.
+The kubelet receives an OS shutdown signal (e.g. via systemd inhibitor
+locks on Linux) and begins terminating pods in priority order.
+
+**What happens to the pod object**: The shutdown manager calls
+`killPodFunc` (`nodeshutdown_manager.go:153`), which sends a
+`SyncPodKill` update to the pod worker (`pod_workers.go:1704-1715`).
+The pod worker enters its termination sequence -- the same
+`SyncTerminatingPod` that handles graceful deletion. The `podStatusFn`
+callback sets `status.Phase = PodFailed` and adds `DisruptionTarget=True`
+with reason `TerminationByKubelet`.
+
+**What does NOT happen**: No one calls DELETE on the pod.
+`metadata.deletionTimestamp` remains nil. The pod object in the API server
+still looks like a normally running pod to any controller that only watches
+`deletionTimestamp` -- which is exactly what the endpoints controllers do.
+
+**Why no deletion**: The node might come back after reboot. Deleting the pod
+would cause the scheduler to reschedule it elsewhere, even when the original
+node returns seconds later with the pod's local state (caches, volumes)
+intact. The kubelet has no way to know if the shutdown is permanent or
+temporary.
+
+**What the pod object looks like** during the grace period (before
+containers stop):
+
+| Field | Value |
+|-------|-------|
+| `metadata.deletionTimestamp` | nil |
+| `status.phase` | `Running` (terminal phase suppressed by `mergePodStatus`) |
+| `status.conditions[DisruptionTarget]` | Not present (suppressed by `mergePodStatus`) |
+| `status.conditions[Ready]` | `True` (probes disabled during shutdown, [#105780](https://github.com/kubernetes/kubernetes/issues/105780)) |
+| Containers | Still running, processing traffic |
+
+The pod is indistinguishable from a healthy running pod to any external
+observer.
+
+#### Kubelet eviction (resource pressure)
+
+The kubelet monitors node resources (memory, disk, PIDs). When usage crosses
+a threshold, the eviction manager selects a pod to evict based on QoS class
+and resource consumption (`eviction_manager.go:420-443`).
+
+**What happens to the pod object**: The eviction manager calls `evictPod()`
+(`eviction_manager.go:611-638`), which in turn calls `killPodFunc` with
+`isEvicted=true`. This sends a `SyncPodKill` update to the pod worker
+(`pod_workers.go:880-888`):
+
+```go
+// pod_workers.go:880-888
+case options.UpdateType == kubetypes.SyncPodKill:
+    if options.KillPodOptions != nil && options.KillPodOptions.Evict {
+        updateLogger.V(4).Info("Pod is being evicted by the kubelet, begin teardown")
+        status.evicted = true
+    } else {
+        updateLogger.V(4).Info("Pod is being removed by the kubelet, begin teardown")
+    }
+    status.terminatingAt = now
+    becameTerminating = true
+```
+
+The `podStatusFn` callback sets `status.Phase = PodFailed` and adds
+`DisruptionTarget=True` with reason `TerminationByKubelet`.
+
+**What does NOT happen**: No DELETE call. `deletionTimestamp` remains nil.
+For soft evictions, the pod gets a grace period
+(`MaxPodGracePeriodSeconds`). For hard evictions (immediate threshold
+breach), `gracePeriodOverride` is set to 0 -- containers are killed
+immediately with no window at all.
+
+**What the pod object looks like** during eviction:
+
+| Field | Value |
+|-------|-------|
+| `metadata.deletionTimestamp` | nil |
+| `status.phase` | `Running` (suppressed) |
+| `status.conditions[DisruptionTarget]` | Not present (suppressed) |
+| `status.conditions[Ready]` | `True` or may go `False` if probe exits early ([#124648](https://github.com/kubernetes/kubernetes/issues/124648)) |
+| Containers | Being killed (hard) or draining (soft) |
+
+#### Kubelet preemption
+
+When a critical pod (e.g. a `system-cluster-critical` pod) cannot be
+admitted because the node lacks resources, the kubelet preempts
+lower-priority pods to make room (`preemption.go:100-122`).
+
+**What happens to the pod object**: Same `killPodFunc` path as eviction.
+The `podStatusFn` sets `status.Phase = PodFailed`, `status.Reason =
+"Preempting"`, and adds `DisruptionTarget=True` with reason
+`TerminationByKubelet`.
+
+**What does NOT happen**: No DELETE call. `deletionTimestamp` remains nil.
+No grace period override is set (`nil`), so the pod's own
+`TerminationGracePeriodSeconds` applies.
+
+**What the pod object looks like**: Same as eviction -- indistinguishable
+from a healthy pod to the endpoints controllers.
+
+#### The common pattern
+
+All three kubelet-initiated disruptions share the same mechanism:
+
+1. A local kubelet component decides the pod must stop.
+2. It calls `killPodFunc`, which sends `SyncPodKill` to the pod worker.
+3. The pod worker enters `SyncTerminatingPod`, which calls `SetPodStatus`
+   (setting DisruptionTarget + terminal phase internally), then blocks on
+   `killPod()`.
+4. `mergePodStatus` suppresses both the phase change and DisruptionTarget
+   because containers are still running.
+5. The pod object in the API server remains unchanged until after
+   containers stop.
+
+No `deletionTimestamp` is ever set. The only signal that could reach the
+endpoints controllers -- `DisruptionTarget` -- is held back by the status
+manager. The pod stays in EndpointSlices, receiving traffic, until it is
+already dead.
 
 ### Why we need a leading indicator
 
@@ -807,14 +954,98 @@ T+N+1s Endpointslice controller reacts, but pod is dead
 
 #### What Phase 1 does NOT cover
 
-- Pods that terminate because their main process exits (RestartNever Jobs).
-- Pods that exceed their `activeDeadlineSeconds`.
-- Any termination not initiated by infrastructure disruption.
+Phase 1 addresses kubelet-initiated disruptions where DisruptionTarget is
+set. Three categories of termination are not covered:
+
+**1. Container exits on RestartNever/RestartOnFailure pods (e.g. Job pods)**
+
+When a container exits on its own, `SyncPod` calls `generateAPIPodStatus`
+which computes the phase from container states (`kubelet_pods.go:1899`).
+If all containers have exited, `getPhase()` returns `Succeeded` or `Failed`.
+`SyncPod` detects this terminal phase and returns `isTerminal=true`
+(`kubelet.go:2087-2090`), which transitions the pod worker into the
+terminating sequence.
+
+Since the containers are **already stopped** at this point, there is no
+window where the pod is "about to die but still serving." The phase
+transitions to terminal, `ShouldPodBeInEndpoints()` returns false (because
+`isPodTerminal()` catches Succeeded/Failed at `controller_utils.go:184`),
+and the pod is removed from endpoints.
+
+**Current behavior**: Effectively correct -- the container is already dead
+when the endpoint is removed. There is no grace period to exploit because
+the termination was not anticipated. However, this means the pod disappears
+from endpoints abruptly, with no time for load balancers to drain. For Job
+pods this is rarely a problem since they typically don't serve traffic. For
+long-running RestartOnFailure pods that do serve traffic (rare), the abrupt
+removal causes the same errors as the disruption case.
+
+**What users do today**: Pods serving traffic almost always use
+`restartPolicy: Always` (Deployments, StatefulSets), where container exit
+triggers a restart, not pod termination. The container might briefly fail
+readiness probes, but the pod stays in endpoints and recovers. The
+RestartNever/OnFailure gap primarily affects Job-like workloads that happen
+to be behind a Service -- uncommon but not impossible.
+
+**2. ActiveDeadlineSeconds exceeded**
+
+When a pod exceeds its `activeDeadlineSeconds`, the kubelet's
+`activeDeadlineHandler.ShouldEvict()` returns true (`active_deadline.go:70-76`).
+This causes `generateAPIPodStatus` to set the phase to `PodFailed` with
+reason `DeadlineExceeded` (`kubelet_pods.go:1929-1933`):
+
+```go
+// kubelet_pods.go:1928-1934
+for _, podSyncHandler := range kl.PodSyncHandlers {
+    if result := podSyncHandler.ShouldEvict(pod); result.Evict {
+        s.Phase = v1.PodFailed
+        s.Reason = result.Reason
+        s.Message = result.Message
+        break
+    }
+}
+```
+
+`SyncPod` sees the terminal phase and returns `isTerminal=true`, which
+triggers `SyncTerminatingPod`. Unlike the container-exit case, containers
+may **still be running** here -- the deadline fired but containers haven't
+been killed yet. `SyncTerminatingPod` calls `killPod()` to stop them. No
+DisruptionTarget is set because this is not infrastructure disruption.
+`mergePodStatus` delays the phase until containers stop. The pod remains
+in endpoints during the kill.
+
+**Current behavior**: Same gap as kubelet-initiated disruption -- the pod
+stays in endpoints while containers are being killed. But
+`activeDeadlineSeconds` is uncommon for traffic-serving workloads (it's
+primarily used for Job time limits).
+
+**What users do today**: No good workaround. The pod is killed without any
+leading signal. Readiness probes will eventually fail if configured, but
+that's trailing.
+
+**3. Other non-infrastructure terminations**
+
+This includes container OOM kills on RestartOnFailure pods (leading to pod
+termination after restart budget is exhausted) and similar edge cases. These
+follow the container-exit or SyncPodKill paths depending on the specifics,
+and share the same characteristics: no DisruptionTarget, no leading signal.
+
+**Summary**: The uncovered cases are either not problematic in practice
+(RestartNever container exit -- already dead when removed) or uncommon for
+traffic-serving workloads (activeDeadlineSeconds, OOM on RestartOnFailure).
+Phase 2's PendingTermination condition would address all of them
+universally.
 
 ### Phase 2: PendingTermination condition (future KEP)
 
-A new condition covering all termination scenarios, including those
-DisruptionTarget cannot address.
+As described above, Phase 1 covers the most impactful scenarios --
+graceful node shutdown, eviction, and preemption -- where traffic-serving
+pods are actively receiving requests while being killed. The remaining
+uncovered cases are either already handled (RestartNever container exit --
+containers are dead before the endpoint is removed, so there is no gap)
+or uncommon for traffic-serving workloads (activeDeadlineSeconds, OOM on
+RestartOnFailure). A second phase could close these remaining edge cases
+with a universal termination signal.
 
 **Definition**: Set to `True` when the kubelet pod worker enters the
 terminating state (`startedTerminating` flag is true), regardless of the
@@ -823,9 +1054,9 @@ reason. This is the earliest unambiguous point in the kubelet lifecycle.
 **Lifecycle**:
 
 - Set to `True` when the pod worker begins termination.
-- Removed if the kubelet restarts and the source of termination was not
-  durable (was not a `deletionTimestamp`). This handles transient
-  disruptions like reboots.
+- Removed if the kubelet process restarts (e.g. after node reboot) and the
+  source of termination was not durable (was not a `deletionTimestamp`).
+  This handles transient disruptions where the pod should resume.
 - Set to `False` when all pod resources (volumes, network) are fully
   released (complementing KEP 4577).
 
@@ -840,12 +1071,13 @@ Separate KEP required.
 **Open design questions for Phase 2**:
 
 - For RestartOnFailure pods where a container fails: is PendingTermination
-  set even though the container will be restarted? (Recommended: no --
-  only set when the pod worker is terminating the pod, not individual
-  container restarts.)
+  set even though the kubelet will restart the container? (Recommended:
+  no -- only set when the pod worker is terminating the entire pod, not
+  on individual container restarts within a running pod.)
 - For RestartAlways pods during graceful shutdown: PendingTermination must
-  be reliably removed after reboot. Since the kubelet has no local store,
-  the condition must be reconstructed from API state on startup.
+  be reliably removed after node reboot. Since the kubelet has no local
+  store, it must reconstruct whether termination is still in progress
+  from the pod's API state when it starts up.
 
 ---
 
@@ -921,7 +1153,8 @@ during graceful shutdown if the node will return. This would require:
 
 - Avoiding terminal phases for RestartAlways pods during shutdown (perhaps
   setting phase to `Pending` instead).
-- After reboot, the kubelet restarts pods normally.
+- After reboot, the kubelet reconciles with the API server and starts
+    containers for pods still assigned to the node.
 - This is a behavior change requiring an opt-in kubelet flag.
 - RestartNever pods should still get terminal phases if the status update
   propagates before shutdown completes.
