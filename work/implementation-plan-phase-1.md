@@ -11,7 +11,7 @@ must change:
 2. **Endpoints controllers**: Consume DisruptionTarget and treat it as a
    termination signal, the same way `deletionTimestamp` is treated today.
 
-See `work/original-proposal.md` for the full problem statement and
+See `work/proposal.md` for the full problem statement and
 `work/assessment.md` for the code-level verification.
 
 ---
@@ -36,12 +36,21 @@ Add the versioned spec (in the alphabetical map):
 
 ```go
 DisruptionTargetSignalsEndpointTerminating: {
-    {Version: version.MustParse("1.36"), Default: false, PreRelease: featuregate.Alpha},
+    {Version: version.MustParse("1.37"), Default: false, PreRelease: featuregate.Alpha},
 },
 ```
 
 **Follows pattern of**: `CRIListStreaming` (constant at line ~121, spec at
 line ~1297).
+
+Also add an entry to the dependencies map (`defaultKubernetesFeatureGateDependencies`,
+line ~2386) -- every gate needs one, even if empty:
+
+```go
+DisruptionTargetSignalsEndpointTerminating: {},
+```
+
+Follows pattern of `CRIListStreaming` (line ~2409).
 
 No tests needed -- the feature gate framework is tested generically.
 
@@ -115,8 +124,8 @@ import (
 )
 ```
 
-Check if already imported; `status_manager.go` may not currently import
-these.
+Both are already imported in `status_manager.go` (lines 39 and 42). No
+changes needed.
 
 ### Tests
 
@@ -189,11 +198,11 @@ func hasDisruptionTargetCondition(pod *v1.Pod) bool {
 ### Tests
 
 **File**: `staging/src/k8s.io/endpointslice/util/controller_utils_test.go`  
-**Location**: `TestPodEndpointsChanged` (line ~520)
+**Location**: `Test_podChanged` (line ~448)
 
 Add modifier for DisruptionTarget condition (similar to existing "mark for
 deletion" modifier at line ~551). Test that appearance of DisruptionTarget
-returns `podChanged=true`.
+returns `podChanged=true, labelsChanged=false`.
 
 ---
 
@@ -230,10 +239,10 @@ func podToEndpoint(pod *v1.Pod, node *v1.Node, service *v1.Service, addressType 
 }
 ```
 
-The `hasDisruptionTargetCondition` helper is in the `util/` subpackage; add
-an exported version or duplicate the 5-line helper in this file (preferred,
-to avoid a circular or awkward import -- the existing `IsPodReady` is already
-copied the same way).
+The `hasDisruptionTargetCondition` helper added in Step 3 lives in the
+`util/` subpackage and is unexported. Duplicate the 5-line helper in this
+file (preferred -- avoids cross-package coupling and matches how
+`IsPodReady` is already duplicated across packages).
 
 ### Caller update
 
@@ -337,8 +346,18 @@ func addEndpointSubset(logger klog.Logger, subsets []v1.EndpointSubset, pod *v1.
     ...
 ```
 
-The `hasDisruptionTargetCondition` helper can be imported from the
-endpointslice util package or duplicated here (it's 5 lines).
+Duplicate the `hasDisruptionTargetCondition` helper here (same 5-line
+function as Steps 3 and 4). The copy in `util/controller_utils.go` is
+unexported and in a different package, so it cannot be imported directly.
+
+This file does not currently import `utilfeature` or `features`. Add:
+
+```go
+import (
+    utilfeature "k8s.io/apiserver/pkg/util/feature"
+    "k8s.io/kubernetes/pkg/features"
+)
+```
 
 Note: the legacy Endpoints API is deprecated but still active. This
 change ensures consistent behavior across both controllers.
@@ -424,6 +443,6 @@ callers.
 
 ## Verification
 
-1. **Unit tests**: `go test ./pkg/kubelet/status/ ./staging/src/k8s.io/endpointslice/... ./pkg/controller/endpoint/ -run "TestMergePodStatus|TestPodToEndpoint|TestPodEndpointsChanged|TestEndpointSubset"`
+1. **Unit tests**: `go test ./pkg/kubelet/status/ ./staging/src/k8s.io/endpointslice/... ./pkg/controller/endpoint/ -run "TestMergePodStatus|TestPodToEndpoint|Test_podChanged"`
 2. **Integration tests**: `go test ./test/integration/endpointslice/ -run "TestEndpointSliceDisruptionTargetTerminating|TestEndpointSliceTerminating" -v`
 3. **Manual verification**: Use a kind cluster with the feature gate enabled. Evict a pod (`kubectl drain`) or trigger node shutdown, and observe that the EndpointSlice marks the pod as `Terminating=true` before the containers stop.

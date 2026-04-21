@@ -966,19 +966,31 @@ If all containers have exited, `getPhase()` returns `Succeeded` or `Failed`.
 (`kubelet.go:2087-2090`), which transitions the pod worker into the
 terminating sequence.
 
-Since the containers are **already stopped** at this point, there is no
-window where the pod is "about to die but still serving." The phase
-transitions to terminal, `ShouldPodBeInEndpoints()` returns false (because
-`isPodTerminal()` catches Succeeded/Failed at `controller_utils.go:184`),
-and the pod is removed from endpoints.
+Since the containers are **already stopped** at this point,
+`couldHaveRunningContainers` is false and `mergePodStatus` sends the
+terminal phase immediately. `ShouldPodBeInEndpoints()` returns false
+(because `isPodTerminal()` catches Succeeded/Failed at
+`controller_utils.go:184`), and the pod is removed from endpoints.
 
-**Current behavior**: Effectively correct -- the container is already dead
-when the endpoint is removed. There is no grace period to exploit because
-the termination was not anticipated. However, this means the pod disappears
-from endpoints abruptly, with no time for load balancers to drain. For Job
-pods this is rarely a problem since they typically don't serve traffic. For
-long-running RestartOnFailure pods that do serve traffic (rare), the abrupt
-removal causes the same errors as the disruption case.
+There is still a brief window (~1-2 seconds of controller propagation)
+between the container exiting and the endpoint being removed. During this
+window, the endpoint points to a dead pod and requests routed to it will
+fail (connection refused). But this is the same window that exists when any
+container crashes unexpectedly -- including in a RestartAlways Deployment
+pod. There is no leading signal possible because the exit was not
+anticipated; the container decided to stop on its own. PendingTermination
+(Phase 2) would not improve this case either, since by the time the kubelet
+detects the exit and the pod worker enters the terminating state, the
+container is already dead -- the condition would arrive alongside the
+terminal phase, not before it.
+
+**Current behavior**: The pod disappears from endpoints abruptly, with no
+time for load balancers to drain -- but this is inherent to unanticipated
+exits, not a missing signal. For Job pods this is rarely a problem since
+they typically don't serve traffic. For long-running RestartOnFailure pods
+that do serve traffic (rare), the abrupt removal causes errors, but no
+phase of this proposal can provide a leading indicator for exits the
+kubelet did not initiate.
 
 **What users do today**: Pods serving traffic almost always use
 `restartPolicy: Always` (Deployments, StatefulSets), where container exit
@@ -1030,22 +1042,25 @@ termination after restart budget is exhausted) and similar edge cases. These
 follow the container-exit or SyncPodKill paths depending on the specifics,
 and share the same characteristics: no DisruptionTarget, no leading signal.
 
-**Summary**: The uncovered cases are either not problematic in practice
-(RestartNever container exit -- already dead when removed) or uncommon for
+**Summary**: The uncovered cases are either inherently unsolvable with a
+leading signal (RestartNever container exit -- the container is already dead
+when detected, so no condition can arrive earlier) or uncommon for
 traffic-serving workloads (activeDeadlineSeconds, OOM on RestartOnFailure).
-Phase 2's PendingTermination condition would address all of them
-universally.
+Phase 2's PendingTermination condition could address the
+activeDeadlineSeconds gap and provide a universal termination signal, but
+the practical impact is limited compared to Phase 1.
 
 ### Phase 2: PendingTermination condition (future KEP)
 
 As described above, Phase 1 covers the most impactful scenarios --
 graceful node shutdown, eviction, and preemption -- where traffic-serving
 pods are actively receiving requests while being killed. The remaining
-uncovered cases are either already handled (RestartNever container exit --
-containers are dead before the endpoint is removed, so there is no gap)
-or uncommon for traffic-serving workloads (activeDeadlineSeconds, OOM on
-RestartOnFailure). A second phase could close these remaining edge cases
-with a universal termination signal.
+uncovered cases are either inherently unsolvable with a leading signal
+(RestartNever container exit -- the container is already dead when the
+kubelet detects it, so no condition can arrive before the exit) or uncommon
+for traffic-serving workloads (activeDeadlineSeconds, OOM on
+RestartOnFailure). A second phase could address the activeDeadlineSeconds
+case and provide a universal termination signal for completeness.
 
 **Definition**: Set to `True` when the kubelet pod worker enters the
 terminating state (`startedTerminating` flag is true), regardless of the
