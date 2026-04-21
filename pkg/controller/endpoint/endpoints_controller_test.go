@@ -42,7 +42,10 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	utiltesting "k8s.io/client-go/util/testing"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	endptspkg "k8s.io/kubernetes/pkg/api/v1/endpoints"
+	"k8s.io/kubernetes/pkg/features"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	controllerpkg "k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/test/utils/ktesting"
@@ -3223,4 +3226,44 @@ func TestSyncEndpointsAddDeletePorts(t *testing.T) {
 	if diff := cmp.Diff(expectEndpoints, endpoints); diff != "" {
 		t.Fatalf("incorrect endpoints after deleting first port:\n%s", diff)
 	}
+}
+
+func TestAddEndpointSubsetDisruptionTarget(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+
+	readyDisruptedPod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns"},
+		Spec:       v1.PodSpec{},
+		Status: v1.PodStatus{
+			Conditions: []v1.PodCondition{
+				{Type: v1.PodReady, Status: v1.ConditionTrue},
+				{Type: v1.DisruptionTarget, Status: v1.ConditionTrue},
+			},
+		},
+	}
+
+	epa := v1.EndpointAddress{IP: "1.2.3.4"}
+	epp := &v1.EndpointPort{Name: "p", Port: 80, Protocol: v1.ProtocolTCP}
+
+	t.Run("gate enabled: disrupted pod placed in NotReadyAddresses", func(t *testing.T) {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DisruptionTargetSignalsEndpointTerminating, true)
+		subsets, ready, notReady := addEndpointSubset(logger, nil, readyDisruptedPod, epa, epp, false)
+		if ready != 0 || notReady != 1 {
+			t.Errorf("expected ready=0, notReady=1, got ready=%d, notReady=%d", ready, notReady)
+		}
+		if len(subsets) != 1 || len(subsets[0].NotReadyAddresses) != 1 {
+			t.Errorf("expected 1 NotReadyAddress, got %+v", subsets)
+		}
+	})
+
+	t.Run("gate disabled: disrupted pod placed in Addresses", func(t *testing.T) {
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DisruptionTargetSignalsEndpointTerminating, false)
+		subsets, ready, notReady := addEndpointSubset(logger, nil, readyDisruptedPod, epa, epp, false)
+		if ready != 1 || notReady != 0 {
+			t.Errorf("expected ready=1, notReady=0, got ready=%d, notReady=%d", ready, notReady)
+		}
+		if len(subsets) != 1 || len(subsets[0].Addresses) != 1 {
+			t.Errorf("expected 1 Address, got %+v", subsets)
+		}
+	})
 }

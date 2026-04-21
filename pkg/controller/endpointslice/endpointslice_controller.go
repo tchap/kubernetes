@@ -184,6 +184,7 @@ func NewController(ctx context.Context, podInformer coreinformers.PodInformer,
 		c.eventRecorder,
 		ControllerName,
 		endpointslicerec.WithPreferSameTrafficDistributionEnabled(utilfeature.DefaultFeatureGate.Enabled(features.PreferSameTrafficDistribution)),
+		endpointslicerec.WithDisruptionTargetSignalsTerminating(utilfeature.DefaultFeatureGate.Enabled(features.DisruptionTargetSignalsEndpointTerminating)),
 	)
 
 	return c

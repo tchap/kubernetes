@@ -464,9 +464,70 @@ func TestPodToEndpoint(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			endpoint := podToEndpoint(testCase.pod, testCase.node, testCase.svc, discovery.AddressTypeIPv4)
+			endpoint := podToEndpoint(testCase.pod, testCase.node, testCase.svc, discovery.AddressTypeIPv4, false)
 			if !reflect.DeepEqual(testCase.expectedEndpoint, endpoint) {
 				t.Errorf("Expected endpoint: %+v, got: %+v", testCase.expectedEndpoint, endpoint)
+			}
+		})
+	}
+}
+
+func TestPodToEndpointDisruptionTarget(t *testing.T) {
+	ns := "test"
+	svc, _ := newServiceAndEndpointMeta("foo", ns)
+
+	readyPod := newPod(1, ns, true, 1, false)
+	disruptedPod := newPod(1, ns, true, 1, false)
+	disruptedPod.Status.Conditions = append(disruptedPod.Status.Conditions, v1.PodCondition{
+		Type:   v1.DisruptionTarget,
+		Status: v1.ConditionTrue,
+	})
+
+	testCases := []struct {
+		name                              string
+		pod                               *v1.Pod
+		disruptionTargetSignalsTerminating bool
+		expectedReady                      bool
+		expectedServing                    bool
+		expectedTerminating                bool
+	}{
+		{
+			name:                              "disrupted pod with flag enabled",
+			pod:                               disruptedPod,
+			disruptionTargetSignalsTerminating: true,
+			expectedReady:                      false,
+			expectedServing:                    true,
+			expectedTerminating:                true,
+		},
+		{
+			name:                              "disrupted pod with flag disabled",
+			pod:                               disruptedPod,
+			disruptionTargetSignalsTerminating: false,
+			expectedReady:                      true,
+			expectedServing:                    true,
+			expectedTerminating:                false,
+		},
+		{
+			name:                              "normal pod with flag enabled",
+			pod:                               readyPod,
+			disruptionTargetSignalsTerminating: true,
+			expectedReady:                      true,
+			expectedServing:                    true,
+			expectedTerminating:                false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint := podToEndpoint(tc.pod, nil, &svc, discovery.AddressTypeIPv4, tc.disruptionTargetSignalsTerminating)
+			if *endpoint.Conditions.Ready != tc.expectedReady {
+				t.Errorf("expected Ready=%v, got %v", tc.expectedReady, *endpoint.Conditions.Ready)
+			}
+			if *endpoint.Conditions.Serving != tc.expectedServing {
+				t.Errorf("expected Serving=%v, got %v", tc.expectedServing, *endpoint.Conditions.Serving)
+			}
+			if *endpoint.Conditions.Terminating != tc.expectedTerminating {
+				t.Errorf("expected Terminating=%v, got %v", tc.expectedTerminating, *endpoint.Conditions.Terminating)
 			}
 		})
 	}

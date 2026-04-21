@@ -336,6 +336,13 @@ const (
 	// DisableNodeKubeProxyVersion disable the status.nodeInfo.kubeProxyVersion field of v1.Node
 	DisableNodeKubeProxyVersion featuregate.Feature = "DisableNodeKubeProxyVersion"
 
+	// owner: @tchap
+	//
+	// When enabled, pods with the DisruptionTarget condition are treated as
+	// terminating by endpoint and endpointslice controllers, and the kubelet
+	// sends the condition to the API server before containers are stopped.
+	DisruptionTargetSignalsEndpointTerminating featuregate.Feature = "DisruptionTargetSignalsEndpointTerminating"
+
 	// owner: @pohly
 	// kep: http://kep.k8s.io/4381
 	//
@@ -1440,6 +1447,10 @@ var defaultVersionedKubernetesFeatureGates = map[featuregate.Feature]featuregate
 		{Version: version.MustParse("1.36"), Default: true, PreRelease: featuregate.Deprecated, LockToDefault: true}, // lock to default in 1.36 and remove in v1.39
 	},
 
+	DisruptionTargetSignalsEndpointTerminating: {
+		{Version: version.MustParse("1.36"), Default: false, PreRelease: featuregate.Alpha},
+	},
+
 	DynamicResourceAllocation: {
 		{Version: version.MustParse("1.26"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("1.32"), Default: false, PreRelease: featuregate.Beta},
@@ -2467,6 +2478,8 @@ var defaultKubernetesFeatureGateDependencies = map[featuregate.Feature][]feature
 	DisableCPUQuotaWithExclusiveCPUs: {},
 
 	DisableNodeKubeProxyVersion: {},
+
+	DisruptionTargetSignalsEndpointTerminating: {},
 
 	DynamicResourceAllocation: {},
 

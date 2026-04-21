@@ -55,6 +55,9 @@ type Reconciler struct {
 	// PreferSameNode) trafficDistribution values should be considered when
 	// reconciling EndpointSlice hints.
 	preferSameTrafficDistribution bool
+	// disruptionTargetSignalsTerminating controls whether pods with the
+	// DisruptionTarget condition are treated as terminating.
+	disruptionTargetSignalsTerminating bool
 	// eventRecorder allows Reconciler to record and publish events.
 	eventRecorder  record.EventRecorder
 	controllerName string
@@ -67,6 +70,14 @@ type ReconcilerOption func(*Reconciler)
 func WithPreferSameTrafficDistributionEnabled(preferSame bool) ReconcilerOption {
 	return func(r *Reconciler) {
 		r.preferSameTrafficDistribution = preferSame
+	}
+}
+
+// WithDisruptionTargetSignalsTerminating controls whether the Reconciler
+// treats pods with the DisruptionTarget condition as terminating.
+func WithDisruptionTargetSignalsTerminating(enabled bool) ReconcilerOption {
+	return func(r *Reconciler) {
+		r.disruptionTargetSignalsTerminating = enabled
 	}
 }
 
@@ -225,7 +236,7 @@ func (r *Reconciler) reconcileByAddressType(logger klog.Logger, service *corev1.
 				continue
 			}
 		}
-		endpoint := podToEndpoint(pod, node, service, addressType)
+		endpoint := podToEndpoint(pod, node, service, addressType, r.disruptionTargetSignalsTerminating)
 		if len(endpoint.Addresses) > 0 {
 			desiredEndpointsByPortMap[epHash].Insert(&endpoint)
 		}

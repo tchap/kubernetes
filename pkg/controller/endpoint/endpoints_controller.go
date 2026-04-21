@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -47,6 +48,7 @@ import (
 	api "k8s.io/kubernetes/pkg/apis/core"
 	helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/controller"
+	"k8s.io/kubernetes/pkg/features"
 	utillabels "k8s.io/kubernetes/pkg/util/labels"
 	utilnet "k8s.io/utils/net"
 )
@@ -637,7 +639,13 @@ func addEndpointSubset(logger klog.Logger, subsets []v1.EndpointSubset, pod *v1.
 	if epp != nil {
 		ports = append(ports, *epp)
 	}
-	if tolerateUnreadyEndpoints || podutil.IsPodReady(pod) {
+	isReady := podutil.IsPodReady(pod)
+	if utilfeature.DefaultFeatureGate.Enabled(features.DisruptionTargetSignalsEndpointTerminating) {
+		if endpointsliceutil.HasDisruptionTargetCondition(pod) {
+			isReady = false
+		}
+	}
+	if tolerateUnreadyEndpoints || isReady {
 		subsets = append(subsets, v1.EndpointSubset{
 			Addresses: []v1.EndpointAddress{epa},
 			Ports:     ports,

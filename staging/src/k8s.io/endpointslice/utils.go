@@ -35,9 +35,12 @@ import (
 )
 
 // podToEndpoint returns an Endpoint object generated from a Pod, a Node, and a Service for a particular addressType.
-func podToEndpoint(pod *v1.Pod, node *v1.Node, service *v1.Service, addressType discovery.AddressType) discovery.Endpoint {
+func podToEndpoint(pod *v1.Pod, node *v1.Node, service *v1.Service, addressType discovery.AddressType, disruptionTargetSignalsTerminating bool) discovery.Endpoint {
 	serving := endpointutil.IsPodReady(pod)
 	terminating := pod.DeletionTimestamp != nil
+	if !terminating && disruptionTargetSignalsTerminating {
+		terminating = endpointutil.HasDisruptionTargetCondition(pod)
+	}
 	// For compatibility reasons, "ready" should never be "true" if a pod is terminatng, unless
 	// publishNotReadyAddresses was set.
 	ready := service.Spec.PublishNotReadyAddresses || (serving && !terminating)
@@ -70,6 +73,7 @@ func podToEndpoint(pod *v1.Pod, node *v1.Node, service *v1.Service, addressType 
 
 	return ep
 }
+
 
 // getEndpointPorts returns a list of EndpointPorts generated from a Service
 // and Pod.

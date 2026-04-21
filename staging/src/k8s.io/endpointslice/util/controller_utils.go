@@ -218,6 +218,9 @@ func podEndpointsChanged(oldPod, newPod *v1.Pod) (bool, bool) {
 	if newPod.DeletionTimestamp != oldPod.DeletionTimestamp {
 		return true, labelsChanged
 	}
+	if HasDisruptionTargetCondition(oldPod) != HasDisruptionTargetCondition(newPod) {
+		return true, labelsChanged
+	}
 	// If the pod's readiness has changed, the associated endpoint address
 	// will move from the unready endpoints set to the ready endpoints.
 	// So for the purposes of an endpoint, a readiness change on a pod
@@ -394,4 +397,15 @@ func getPodReadyCondition(status *v1.PodStatus) *v1.PodCondition {
 		}
 	}
 	return nil
+}
+
+// HasDisruptionTargetCondition returns true if the pod has the
+// DisruptionTarget condition set to True.
+func HasDisruptionTargetCondition(pod *v1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == v1.DisruptionTarget && c.Status == v1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }

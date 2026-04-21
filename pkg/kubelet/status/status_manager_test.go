@@ -43,9 +43,12 @@ import (
 	core "k8s.io/client-go/testing"
 	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/component-base/metrics/testutil"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/ktesting"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/kubernetes/pkg/features"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
@@ -2096,6 +2099,55 @@ func TestMergePodStatus(t *testing.T) {
 			output := mergePodStatus(pod, oldPodStatus, tc.newPodStatus(getPodStatus()), tc.hasRunningContainers)
 			if !conditionsEqual(output.Conditions, tc.expectPodStatus.Conditions) || !statusEqual(output, tc.expectPodStatus) {
 				t.Fatalf("unexpected output: %s", cmp.Diff(tc.expectPodStatus, output))
+			}
+		})
+	}
+}
+
+func TestMergePodStatusDisruptionTargetGate(t *testing.T) {
+	for _, tc := range []struct {
+		desc            string
+		gateEnabled     bool
+		expectCondition bool
+	}{
+		{
+			desc:            "gate enabled: DisruptionTarget sent while phase stays Running",
+			gateEnabled:     true,
+			expectCondition: true,
+		},
+		{
+			desc:            "gate disabled: DisruptionTarget still delayed when containers running",
+			gateEnabled:     false,
+			expectCondition: false,
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DisruptionTargetSignalsEndpointTerminating, tc.gateEnabled)
+
+			oldPodStatus := getPodStatus()
+			newPodStatus := getPodStatus()
+			newPodStatus.Phase = v1.PodFailed
+			newPodStatus.Conditions = append(newPodStatus.Conditions, v1.PodCondition{
+				Type:   v1.DisruptionTarget,
+				Status: v1.ConditionTrue,
+				Reason: "TerminationByKubelet",
+			})
+			pod := &v1.Pod{Status: oldPodStatus}
+			output := mergePodStatus(pod, oldPodStatus, newPodStatus, true)
+
+			if output.Phase != v1.PodRunning {
+				t.Errorf("expected phase Running, got %v", output.Phase)
+			}
+
+			hasCondition := false
+			for _, c := range output.Conditions {
+				if c.Type == v1.DisruptionTarget {
+					hasCondition = true
+					break
+				}
+			}
+			if hasCondition != tc.expectCondition {
+				t.Errorf("expected DisruptionTarget condition present=%v, got %v", tc.expectCondition, hasCondition)
 			}
 		})
 	}

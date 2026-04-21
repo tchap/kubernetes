@@ -556,6 +556,16 @@ func Test_podChanged(t *testing.T) {
 			podChanged:    true,
 			labelsChanged: false,
 		}, {
+			testName: "add DisruptionTarget condition",
+			modifier: func(old, new *v1.Pod) {
+				new.Status.Conditions = append(new.Status.Conditions, v1.PodCondition{
+					Type:   v1.DisruptionTarget,
+					Status: v1.ConditionTrue,
+				})
+			},
+			podChanged:    true,
+			labelsChanged: false,
+		}, {
 			testName: "add label",
 			modifier: func(old, new *v1.Pod) {
 				new.Labels["label"] = "new"
