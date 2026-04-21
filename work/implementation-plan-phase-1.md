@@ -443,6 +443,6 @@ callers.
 
 ## Verification
 
-1. **Unit tests**: `go test ./pkg/kubelet/status/ ./staging/src/k8s.io/endpointslice/... ./pkg/controller/endpoint/ -run "TestMergePodStatus|TestPodToEndpoint|Test_podChanged"`
-2. **Integration tests**: `go test ./test/integration/endpointslice/ -run "TestEndpointSliceDisruptionTargetTerminating|TestEndpointSliceTerminating" -v`
-3. **Manual verification**: Use a kind cluster with the feature gate enabled. Evict a pod (`kubectl drain`) or trigger node shutdown, and observe that the EndpointSlice marks the pod as `Terminating=true` before the containers stop.
+1. **Unit tests**: `go test ./pkg/kubelet/status/ ./staging/src/k8s.io/endpointslice/... ./pkg/controller/endpoint/ -run "TestMergePodStatus|TestPodToEndpoint|Test_podChanged|TestAddEndpointSubsetDisruptionTarget"`
+2. **Integration tests**: `PATH="third_party/etcd:$PATH" make test-integration WHAT=./test/integration/endpointslice GOFLAGS="-v" KUBE_TEST_ARGS='-run ^TestEndpointSliceDisruptionTargetTerminating$'`
+3. **Manual verification**: see `work/manual-verification-plan-phase-1.md`.
